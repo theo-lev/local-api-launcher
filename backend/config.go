@@ -11,8 +11,13 @@ type Repo struct {
 	Path string `json:"path"`
 }
 
+type Settings struct {
+	MavenPath string `json:"mavenPath"`
+}
+
 type config struct {
-	Repos []Repo `json:"repos"`
+	Repos    []Repo   `json:"repos"`
+	Settings Settings `json:"settings"`
 }
 
 type Store struct {
@@ -70,4 +75,17 @@ func (s *Store) Remove(id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (s *Store) GetSettings() Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.Settings
+}
+
+func (s *Store) SaveSettings(settings Settings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Settings = settings
+	return s.save()
 }

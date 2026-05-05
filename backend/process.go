@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"sync"
-	"syscall"
 )
 
 type ProcessManager struct {
@@ -22,16 +22,26 @@ func NewProcessManager() *ProcessManager {
 	}
 }
 
-func (pm *ProcessManager) Start(id, repoPath string) error {
+func mavenExe(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if runtime.GOOS == "windows" {
+		return "mvn.cmd"
+	}
+	return "mvn"
+}
+
+func (pm *ProcessManager) Start(id, repoPath, mavenPath string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if _, ok := pm.procs[id]; ok {
 		return fmt.Errorf("already running")
 	}
 
-	cmd := exec.Command("mvn", "spring-boot:run", "-DskipTests")
+	cmd := exec.Command(mavenExe(mavenPath), "spring-boot:run", "-DskipTests")
 	cmd.Dir = repoPath
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcAttr(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -72,7 +82,7 @@ func (pm *ProcessManager) Stop(id string) error {
 	if !ok {
 		return fmt.Errorf("not running")
 	}
-	syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	killProc(cmd)
 	delete(pm.procs, id)
 	return nil
 }
@@ -92,6 +102,7 @@ func (pm *ProcessManager) GetSession(id string) *LogSession {
 
 func pipeLines(r io.Reader, s *LogSession) {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		s.append(scanner.Text())
 	}

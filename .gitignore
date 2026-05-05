@@ -1,0 +1,11 @@
+.idea/
+api-manager
+api-manager.exe
+backend/api-manager
+backend/api-manager.exe
+backend/dist/
+backend/target
+frontend/node_modules/
+dist/
+config.json
+backend/config.json

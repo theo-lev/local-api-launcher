@@ -166,8 +166,27 @@ func (h *repoHandlers) start(w http.ResponseWriter, r *http.Request, id string) 
 	if !ok {
 		return
 	}
-	if err := h.manager.Start(id, repo.Path); err != nil {
+	mavenPath := h.store.GetSettings().MavenPath
+	if err := h.manager.Start(id, repo.Path, mavenPath); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *repoHandlers) getSettings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.store.GetSettings())
+}
+
+func (h *repoHandlers) putSettings(w http.ResponseWriter, r *http.Request) {
+	var s Settings
+	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.SaveSettings(s); err != nil {
+		http.Error(w, "failed to save settings", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

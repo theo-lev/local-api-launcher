@@ -1,21 +1,42 @@
 package main
 
 import (
+	"embed"
+	"io/fs"
 	"log"
 	"net/http"
 	"strings"
 )
 
+//go:embed all:dist
+var distFS embed.FS
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, PUT, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func spaHandler(assets fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(assets))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path != "" {
+			if f, err := assets.Open(path); err == nil {
+				f.Close()
+			} else {
+				http.ServeFileFS(w, r, assets, "index.html")
+				return
+			}
+		}
+		fileServer.ServeHTTP(w, r)
 	})
 }
 
@@ -34,6 +55,17 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
+	mux.HandleFunc("/api/settings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			h.getSettings(w, r)
+		case http.MethodPut:
+			h.putSettings(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	mux.HandleFunc("/api/repos", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -46,7 +78,6 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/repos/", func(w http.ResponseWriter, r *http.Request) {
-		// Parse /api/repos/:id[/sub]
 		rest := strings.TrimPrefix(r.URL.Path, "/api/repos/")
 		parts := strings.SplitN(rest, "/", 2)
 		id := parts[0]
@@ -74,7 +105,13 @@ func main() {
 		}
 	})
 
-	log.Println("Backend listening on :8080")
+	frontendFS, err := fs.Sub(distFS, "dist")
+	if err != nil {
+		log.Fatal("failed to load embedded frontend:", err)
+	}
+	mux.Handle("/", spaHandler(frontendFS))
+
+	log.Println("API Manager running at http://localhost:8080")
 	if err := http.ListenAndServe(":8080", corsMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}

@@ -2,8 +2,8 @@ package main
 
 import "sync"
 
-// LogSession holds the in-memory log buffer for one process run and fans lines
-// out to any number of subscribed SSE clients.
+const maxLogLines = 2000
+
 type LogSession struct {
 	mu      sync.Mutex
 	lines   []string
@@ -18,10 +18,13 @@ func (s *LogSession) append(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lines = append(s.lines, line)
+	if len(s.lines) > maxLogLines {
+		s.lines = s.lines[len(s.lines)-maxLogLines:]
+	}
 	for ch := range s.clients {
 		select {
 		case ch <- line:
-		default: // slow client — drop rather than block
+		default:
 		}
 	}
 }

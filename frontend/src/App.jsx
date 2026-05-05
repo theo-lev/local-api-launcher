@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 
-const API = 'http://localhost:8080'
+const API = ''
 
 function basename(path) {
-  return path.split('/').filter(Boolean).pop() ?? path
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path
 }
 
 function StatusDot({ status }) {
@@ -15,11 +15,72 @@ function StatusDot({ status }) {
   )
 }
 
+function SettingsPanel({ onClose }) {
+  const [mavenPath, setMavenPath] = useState('')
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    fetch(`${API}/api/settings`)
+      .then(r => r.json())
+      .then(s => setMavenPath(s.mavenPath || ''))
+      .catch(() => {})
+  }, [])
+
+  const save = async () => {
+    setError('')
+    const res = await fetch(`${API}/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mavenPath }),
+    })
+    if (!res.ok) { setError('Failed to save'); return }
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  return (
+    <div style={s.settingsPanel}>
+      <div style={s.settingsPanelHeader}>
+        <span style={s.settingsPanelTitle}>Settings</span>
+        <button style={s.closeBtn} onClick={onClose}>✕</button>
+      </div>
+      <label style={s.settingsLabel}>Maven executable</label>
+      <input
+        style={s.settingsInput}
+        type="text"
+        value={mavenPath}
+        onChange={e => setMavenPath(e.target.value)}
+        placeholder={`leave empty to use mvn / mvn.cmd from PATH`}
+        spellCheck={false}
+      />
+      <p style={s.settingsHint}>
+        Full path to mvn (or mvn.cmd on Windows).<br />
+        Example: <code>C:\apache-maven\bin\mvn.cmd</code>
+      </p>
+      {error && <p style={s.errorText}>{error}</p>}
+      <button style={{ ...s.btn, ...(saved ? s.btnSaved : {}) }} onClick={save}>
+        {saved ? 'Saved!' : 'Save'}
+      </button>
+    </div>
+  )
+}
+
 function Sidebar({ repos, selectedId, onSelect, onRemove }) {
+  const [showSettings, setShowSettings] = useState(false)
+
   return (
     <aside style={s.sidebar}>
-      <div style={s.sidebarHeader}>Repos</div>
-      {repos.length === 0 && <p style={s.empty}>No repos registered.</p>}
+      <div style={s.sidebarHeader}>
+        <span>Repos</span>
+        <button
+          style={s.gearBtn}
+          onClick={() => setShowSettings(v => !v)}
+          title="Settings"
+        >⚙</button>
+      </div>
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+      {repos.length === 0 && !showSettings && <p style={s.empty}>No repos registered.</p>}
       <ul style={s.list}>
         {repos.map(r => (
           <li
@@ -33,7 +94,7 @@ function Sidebar({ repos, selectedId, onSelect, onRemove }) {
               <button style={s.removeBtn} onClick={e => { e.stopPropagation(); onRemove(r.id) }}>✕</button>
             </div>
             {r.pathError
-              ? <span style={s.branchLabel} style2={s.branchError}>path not found</span>
+              ? <span style={{ ...s.branchLabel, color: '#ef4444' }}>path not found</span>
               : <span style={s.branchLabel}>{r.currentBranch || '—'}</span>}
           </li>
         ))}
@@ -49,8 +110,9 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   const [checkoutError, setCheckoutError] = useState(null)
   const [processError, setProcessError] = useState('')
   const [logs, setLogs] = useState([])
-  const logsEndRef = useRef(null)
+  const logBodyRef = useRef(null)
   const esRef = useRef(null)
+  const pendingRef = useRef([])
 
   const loadBranches = useCallback(() => {
     if (!repo || repo.pathError) return
@@ -66,27 +128,59 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
     setCheckoutError(null)
     setProcessError('')
     setLogs([])
+    pendingRef.current = []
     loadBranches()
   }, [repo?.id])
 
-  // Connect SSE when running, disconnect when stopped
+  // Drain pending SSE lines into state every 100ms to avoid per-line re-renders
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (pendingRef.current.length === 0) return
+      const lines = pendingRef.current.splice(0)
+      setLogs(prev => {
+        const next = [...prev, ...lines]
+        return next.length > 2000 ? next.slice(-2000) : next
+      })
+    }, 100)
+    return () => clearInterval(id)
+  }, [])
+
+  // Auto-scroll to bottom when logs update
+  useEffect(() => {
+    const el = logBodyRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [logs])
+
+  // SSE connection with auto-reconnect on error
   useEffect(() => {
     if (!repo || repo.status !== 'running') {
       esRef.current?.close()
       esRef.current = null
       return
     }
-    const es = new EventSource(`${API}/api/repos/${repo.id}/logs`)
-    esRef.current = es
-    es.onmessage = e => setLogs(prev => [...prev, e.data])
-    es.onerror = () => { es.close(); esRef.current = null }
-    return () => { es.close(); esRef.current = null }
-  }, [repo?.id, repo?.status])
 
-  // Auto-scroll to bottom as logs arrive
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [logs])
+    let active = true
+    let es
+    let retryTimer
+
+    function connect() {
+      es = new EventSource(`${API}/api/repos/${repo.id}/logs`)
+      esRef.current = es
+      es.onmessage = e => { pendingRef.current.push(e.data) }
+      es.onerror = () => {
+        es.close()
+        if (active) retryTimer = setTimeout(connect, 2000)
+      }
+    }
+    connect()
+
+    return () => {
+      active = false
+      clearTimeout(retryTimer)
+      es?.close()
+      esRef.current = null
+    }
+  }, [repo?.id, repo?.status])
 
   if (!repo) {
     return <div style={{ ...s.detail, ...s.detailEmpty }}><span style={{ color: '#aaa' }}>Select a repo to manage it.</span></div>
@@ -95,7 +189,7 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   const handleStartStop = async () => {
     setProcessError('')
     const isRunning = repo.status === 'running'
-    if (!isRunning) setLogs([])
+    if (!isRunning) { setLogs([]); pendingRef.current = [] }
     const res = await fetch(`${API}/api/repos/${repo.id}/${isRunning ? 'stop' : 'start'}`, { method: 'POST' })
     if (!res.ok) setProcessError(await res.text())
     else onStatusChanged()
@@ -175,12 +269,11 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
 
           <div style={s.logPanel}>
             <div style={s.logHeader}>Logs</div>
-            <div style={s.logBody}>
+            <div ref={logBodyRef} style={s.logBody}>
               {logs.length === 0
                 ? <span style={s.logEmpty}>{repo.status === 'running' ? 'Waiting for output…' : 'Start the service to see logs.'}</span>
                 : logs.map((line, i) => <div key={i} style={s.logLine}>{line}</div>)
               }
-              <div ref={logsEndRef} />
             </div>
           </div>
         </>
@@ -224,20 +317,18 @@ export default function App() {
     setSelected(repo)
   }
 
-  const removeRepo = async id => {
-    await fetch(`${API}/api/repos/${id}`, { method: 'DELETE' })
-    setRepos(prev => prev.filter(r => r.id !== id))
-    setSelected(prev => prev?.id === id ? null : prev)
-  }
-
   return (
     <div style={s.layout}>
-      <Sidebar repos={repos} selectedId={selected?.id} onSelect={setSelected} onRemove={removeRepo} />
+      <Sidebar repos={repos} selectedId={selected?.id} onSelect={setSelected} onRemove={async id => {
+        await fetch(`${API}/api/repos/${id}`, { method: 'DELETE' })
+        setRepos(prev => prev.filter(r => r.id !== id))
+        setSelected(prev => prev?.id === id ? null : prev)
+      }} />
       <div style={s.right}>
         <DetailPanel repo={selected} onBranchChanged={fetchRepos} onStatusChanged={fetchRepos} />
         <div style={s.addBar}>
           <form onSubmit={addRepo} style={s.form}>
-            <input style={s.input} type="text" placeholder="/absolute/path/to/repo"
+            <input style={s.input} type="text" placeholder="/path/to/repo  or  C:\path\to\repo"
               value={path} onChange={e => setPath(e.target.value)} />
             <button style={s.btn} type="submit">Add repo</button>
           </form>
@@ -252,7 +343,18 @@ const s = {
   layout: { display: 'flex', height: '100vh', fontFamily: 'monospace', fontSize: 13, color: '#1a1a1a' },
 
   sidebar: { width: 240, borderRight: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column', flexShrink: 0 },
-  sidebarHeader: { padding: '12px 16px', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#9ca3af', borderBottom: '1px solid #e5e7eb' },
+  sidebarHeader: { padding: '12px 16px', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#9ca3af', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+  gearBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 14, padding: 0, lineHeight: 1 },
+
+  settingsPanel: { borderBottom: '1px solid #e5e7eb', padding: '12px 16px', background: '#fafafa' },
+  settingsPanelHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  settingsPanelTitle: { fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#6b7280' },
+  closeBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 11, padding: 0 },
+  settingsLabel: { display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4 },
+  settingsInput: { width: '100%', boxSizing: 'border-box', padding: '5px 8px', fontFamily: 'monospace', fontSize: 12, border: '1px solid #d1d5db', borderRadius: 4, marginBottom: 4, outline: 'none' },
+  settingsHint: { fontSize: 10, color: '#9ca3af', margin: '0 0 8px', lineHeight: 1.5 },
+  btnSaved: { background: '#22c55e', borderColor: '#16a34a', color: '#fff' },
+
   empty: { padding: '12px 16px', color: '#aaa', fontSize: 12, margin: 0 },
   list: { listStyle: 'none', padding: 0, margin: 0, overflowY: 'auto', flex: 1 },
   item: { padding: '10px 16px', cursor: 'pointer', borderBottom: '1px solid #f3f4f6' },
@@ -260,7 +362,6 @@ const s = {
   repoName: { fontWeight: 'bold', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   removeBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#d1d5db', fontSize: 11, padding: 0, lineHeight: 1 },
   branchLabel: { fontSize: 11, color: '#6b7280', paddingLeft: 16 },
-  branchError: { color: '#ef4444' },
 
   right: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
 
