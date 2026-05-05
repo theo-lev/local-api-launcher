@@ -13,7 +13,7 @@ trap cleanup INT TERM
 
 echo "Starting backend on :8080..."
 cd "$ROOT/backend"
-go run . &
+mvn spring-boot:run -DskipTests -q &
 BACKEND_PID=$!
 
 echo "Starting frontend on :3000..."
