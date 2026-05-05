@@ -22,7 +22,7 @@ public class ProcessManager {
         try {
             if (procs.containsKey(id)) throw new IllegalStateException("already running");
 
-            ProcessBuilder pb = new ProcessBuilder("mvn", "spring-boot:run", "-DskipTests")
+            ProcessBuilder pb = new ProcessBuilder("C:\\dev\\tools\\apache-maven-3.9.9\\bin\\mvn.cmd", "spring-boot:run", "-DskipTests")
                     .directory(new File(repoPath));
 
             LogSession session = new LogSession();
