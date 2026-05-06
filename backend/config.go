@@ -13,11 +13,13 @@ type Repo struct {
 
 type Settings struct {
 	MavenPath string `json:"mavenPath"`
+	JdkPath   string `json:"jdkPath"`
 }
 
 type config struct {
-	Repos    []Repo   `json:"repos"`
-	Settings Settings `json:"settings"`
+	Repos    []Repo         `json:"repos"`
+	Settings Settings       `json:"settings"`
+	Pids     map[string]int `json:"pids,omitempty"`
 }
 
 type Store struct {
@@ -75,6 +77,33 @@ func (s *Store) Remove(id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (s *Store) StorePid(id string, pid int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.Pids == nil {
+		s.data.Pids = make(map[string]int)
+	}
+	s.data.Pids[id] = pid
+	return s.save()
+}
+
+func (s *Store) RemovePid(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data.Pids, id)
+	return s.save()
+}
+
+func (s *Store) GetPids() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]int, len(s.data.Pids))
+	for k, v := range s.data.Pids {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *Store) GetSettings() Settings {

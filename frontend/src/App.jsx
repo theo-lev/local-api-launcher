@@ -17,13 +17,17 @@ function StatusDot({ status }) {
 
 function SettingsPanel({ onClose }) {
   const [mavenPath, setMavenPath] = useState('')
+  const [jdkPath, setJdkPath] = useState('')
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     fetch(`${API}/api/settings`)
       .then(r => r.json())
-      .then(s => setMavenPath(s.mavenPath || ''))
+      .then(s => {
+        setMavenPath(s.mavenPath || '')
+        setJdkPath(s.jdkPath || '')
+      })
       .catch(() => {})
   }, [])
 
@@ -32,7 +36,7 @@ function SettingsPanel({ onClose }) {
     const res = await fetch(`${API}/api/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mavenPath }),
+      body: JSON.stringify({ mavenPath, jdkPath }),
     })
     if (!res.ok) { setError('Failed to save'); return }
     setSaved(true)
@@ -57,6 +61,19 @@ function SettingsPanel({ onClose }) {
       <p style={s.settingsHint}>
         Full path to mvn (or mvn.cmd on Windows).<br />
         Example: <code>C:\apache-maven\bin\mvn.cmd</code>
+      </p>
+      <label style={s.settingsLabel}>JDK path (JAVA_HOME)</label>
+      <input
+        style={s.settingsInput}
+        type="text"
+        value={jdkPath}
+        onChange={e => setJdkPath(e.target.value)}
+        placeholder="leave empty to use system JAVA_HOME"
+        spellCheck={false}
+      />
+      <p style={s.settingsHint}>
+        Root directory of the JDK that has your certificates.<br />
+        Example: <code>C:\Program Files\Eclipse Adoptium\jdk-17</code>
       </p>
       {error && <p style={s.errorText}>{error}</p>}
       <button style={{ ...s.btn, ...(saved ? s.btnSaved : {}) }} onClick={save}>
@@ -107,6 +124,8 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   const [branches, setBranches] = useState([])
   const [fetching, setFetching] = useState(false)
   const [fetchError, setFetchError] = useState('')
+  const [pulling, setPulling] = useState(false)
+  const [pullError, setPullError] = useState(null)
   const [checkoutError, setCheckoutError] = useState(null)
   const [processError, setProcessError] = useState('')
   const [logs, setLogs] = useState([])
@@ -125,6 +144,7 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   useEffect(() => {
     setBranches([])
     setFetchError('')
+    setPullError(null)
     setCheckoutError(null)
     setProcessError('')
     setLogs([])
@@ -195,6 +215,16 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
     else onStatusChanged()
   }
 
+  const handlePull = async () => {
+    setPulling(true)
+    setPullError(null)
+    const res = await fetch(`${API}/api/repos/${repo.id}/pull`, { method: 'POST' })
+    setPulling(false)
+    if (res.ok) { onBranchChanged(); return }
+    if (res.status === 409) setPullError(await res.json())
+    else setPullError({ error: await res.text(), files: [] })
+  }
+
   const handleFetch = async () => {
     setFetching(true)
     setFetchError('')
@@ -223,6 +253,7 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
         <h2 style={s.detailTitle}>{basename(repo.path)}</h2>
         <StatusDot status={repo.status} />
         <span style={s.statusLabel}>{repo.status}</span>
+        {repo.reconnected && <span style={s.reconnectedBadge}>reconnected</span>}
       </div>
       <p style={s.detailPath}>{repo.path}</p>
 
@@ -240,6 +271,9 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
             <button style={s.btn} onClick={handleFetch} disabled={fetching}>
               {fetching ? 'Fetching…' : 'Fetch'}
             </button>
+            <button style={s.btn} onClick={handlePull} disabled={pulling}>
+              {pulling ? 'Updating…' : 'Update'}
+            </button>
             <button
               style={{ ...s.btn, ...(repo.status === 'running' ? s.btnStop : s.btnStart) }}
               onClick={handleStartStop}
@@ -251,6 +285,21 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
 
           {fetchError && <p style={s.errorText}>{fetchError}</p>}
           {processError && <p style={s.errorText}>{processError}</p>}
+
+          {pullError && (
+            <div style={s.dirtyBox}>
+              <p style={s.dirtyTitle}>
+                {pullError.error === 'dirty'
+                  ? 'Cannot pull — uncommitted changes:'
+                  : pullError.error}
+              </p>
+              {pullError.files?.length > 0 && (
+                <ul style={s.dirtyList}>
+                  {pullError.files.map(f => <li key={f}>{f}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
 
           {checkoutError && (
             <div style={s.dirtyBox}>
@@ -378,6 +427,7 @@ const s = {
   btnStart: { background: '#22c55e', borderColor: '#16a34a', color: '#fff' },
   btnStop: { background: '#ef4444', borderColor: '#dc2626', color: '#fff' },
   portBadge: { marginLeft: 4, fontSize: 12, color: '#6b7280' },
+  reconnectedBadge: { fontSize: 11, color: '#f97316', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 4, padding: '2px 6px' },
 
   dirtyBox: { background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 4, padding: '10px 14px', marginBottom: 10 },
   dirtyTitle: { margin: '0 0 6px', color: '#dc2626', fontWeight: 'bold', fontSize: 12 },

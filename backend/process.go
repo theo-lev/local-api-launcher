@@ -4,21 +4,30 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"sync"
 )
 
-type ProcessManager struct {
-	mu       sync.Mutex
-	procs    map[string]*exec.Cmd
-	sessions map[string]*LogSession
+type managedProcess struct {
+	cmd         *exec.Cmd
+	pid         int
+	reconnected bool
 }
 
-func NewProcessManager() *ProcessManager {
+type ProcessManager struct {
+	mu       sync.Mutex
+	procs    map[string]*managedProcess
+	sessions map[string]*LogSession
+	store    *Store
+}
+
+func NewProcessManager(store *Store) *ProcessManager {
 	return &ProcessManager{
-		procs:    make(map[string]*exec.Cmd),
+		procs:    make(map[string]*managedProcess),
 		sessions: make(map[string]*LogSession),
+		store:    store,
 	}
 }
 
@@ -32,7 +41,7 @@ func mavenExe(configured string) string {
 	return "mvn"
 }
 
-func (pm *ProcessManager) Start(id, repoPath, mavenPath string) error {
+func (pm *ProcessManager) Start(id, repoPath, mavenPath, jdkPath string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if _, ok := pm.procs[id]; ok {
@@ -41,6 +50,9 @@ func (pm *ProcessManager) Start(id, repoPath, mavenPath string) error {
 
 	cmd := exec.Command(mavenExe(mavenPath), "spring-boot:run", "-DskipTests")
 	cmd.Dir = repoPath
+	if jdkPath != "" {
+		cmd.Env = append(os.Environ(), "JAVA_HOME="+jdkPath)
+	}
 	setProcAttr(cmd)
 
 	stdout, err := cmd.StdoutPipe()
@@ -59,7 +71,8 @@ func (pm *ProcessManager) Start(id, repoPath, mavenPath string) error {
 		delete(pm.sessions, id)
 		return err
 	}
-	pm.procs[id] = cmd
+	pm.procs[id] = &managedProcess{cmd: cmd, pid: cmd.Process.Pid}
+	pm.store.StorePid(id, cmd.Process.Pid)
 
 	go pipeLines(stdout, session)
 	go pipeLines(stderr, session)
@@ -69,6 +82,7 @@ func (pm *ProcessManager) Start(id, repoPath, mavenPath string) error {
 		pm.mu.Lock()
 		delete(pm.procs, id)
 		pm.mu.Unlock()
+		pm.store.RemovePid(id)
 		session.closeAll()
 	}()
 
@@ -78,20 +92,46 @@ func (pm *ProcessManager) Start(id, repoPath, mavenPath string) error {
 func (pm *ProcessManager) Stop(id string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	cmd, ok := pm.procs[id]
+	proc, ok := pm.procs[id]
 	if !ok {
 		return fmt.Errorf("not running")
 	}
-	killProc(cmd)
+	if proc.reconnected {
+		killByPid(proc.pid)
+	} else {
+		killProc(proc.cmd)
+	}
 	delete(pm.procs, id)
+	pm.store.RemovePid(id)
 	return nil
+}
+
+func (pm *ProcessManager) Reconnect(id string, pid int) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.procs[id] = &managedProcess{pid: pid, reconnected: true}
 }
 
 func (pm *ProcessManager) IsRunning(id string) bool {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	_, ok := pm.procs[id]
-	return ok
+	proc, ok := pm.procs[id]
+	if !ok {
+		return false
+	}
+	if proc.reconnected && !isAlive(proc.pid) {
+		delete(pm.procs, id)
+		pm.store.RemovePid(id)
+		return false
+	}
+	return true
+}
+
+func (pm *ProcessManager) IsReconnected(id string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	proc, ok := pm.procs[id]
+	return ok && proc.reconnected
 }
 
 func (pm *ProcessManager) GetSession(id string) *LogSession {

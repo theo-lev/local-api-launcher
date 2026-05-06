@@ -46,7 +46,15 @@ func main() {
 		log.Fatal("failed to load config:", err)
 	}
 
-	h := &repoHandlers{store: store, manager: NewProcessManager()}
+	manager := NewProcessManager(store)
+	for id, pid := range store.GetPids() {
+		if isAlive(pid) {
+			manager.Reconnect(id, pid)
+		} else {
+			store.RemovePid(id)
+		}
+	}
+	h := &repoHandlers{store: store, manager: manager}
 
 	mux := http.NewServeMux()
 
@@ -90,6 +98,8 @@ func main() {
 			h.remove(w, r, id)
 		case r.Method == http.MethodPost && sub == "fetch":
 			h.fetch(w, r, id)
+		case r.Method == http.MethodPost && sub == "pull":
+			h.pull(w, r, id)
 		case r.Method == http.MethodGet && sub == "branches":
 			h.branches(w, r, id)
 		case r.Method == http.MethodPost && sub == "checkout":

@@ -17,6 +17,7 @@ type RepoInfo struct {
 	Status        string `json:"status"`
 	Port          int    `json:"port"`
 	PathError     bool   `json:"pathError,omitempty"`
+	Reconnected   bool   `json:"reconnected,omitempty"`
 }
 
 type repoHandlers struct {
@@ -34,6 +35,7 @@ func (h *repoHandlers) enrich(r Repo) RepoInfo {
 	info := RepoInfo{ID: r.ID, Path: r.Path, Status: "stopped"}
 	if h.manager.IsRunning(r.ID) {
 		info.Status = "running"
+		info.Reconnected = h.manager.IsReconnected(r.ID)
 	}
 	if _, err := os.Stat(r.Path); os.IsNotExist(err) {
 		info.PathError = true
@@ -161,13 +163,36 @@ func (h *repoHandlers) checkout(w http.ResponseWriter, r *http.Request, id strin
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
+func (h *repoHandlers) pull(w http.ResponseWriter, r *http.Request, id string) {
+	repo, ok := h.repoByID(w, id)
+	if !ok {
+		return
+	}
+	err := pullBranch(repo.Path)
+	if err == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var dirty *DirtyWorkingTree
+	if errors.As(err, &dirty) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "dirty",
+			"files": dirty.Files,
+		})
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
 func (h *repoHandlers) start(w http.ResponseWriter, r *http.Request, id string) {
 	repo, ok := h.repoByID(w, id)
 	if !ok {
 		return
 	}
-	mavenPath := h.store.GetSettings().MavenPath
-	if err := h.manager.Start(id, repo.Path, mavenPath); err != nil {
+	settings := h.store.GetSettings()
+	if err := h.manager.Start(id, repo.Path, settings.MavenPath, settings.JdkPath); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}

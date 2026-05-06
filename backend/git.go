@@ -50,6 +50,33 @@ type DirtyWorkingTree struct {
 
 func (e *DirtyWorkingTree) Error() string { return "working tree has uncommitted changes" }
 
+func pullBranch(repoPath string) error {
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = repoPath
+	out, err := statusCmd.Output()
+	if err != nil {
+		return fmt.Errorf("git status failed: %w", err)
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" || strings.HasPrefix(line, "??") {
+			continue
+		}
+		if len(line) > 3 {
+			files = append(files, strings.TrimSpace(line[3:]))
+		}
+	}
+	if len(files) > 0 {
+		return &DirtyWorkingTree{Files: files}
+	}
+	pullCmd := exec.Command("git", "pull", "--ff-only")
+	pullCmd.Dir = repoPath
+	if pullOut, err := pullCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s", strings.TrimSpace(string(pullOut)))
+	}
+	return nil
+}
+
 func checkoutBranch(repoPath, branch string) error {
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = repoPath
