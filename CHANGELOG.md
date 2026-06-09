@@ -5,10 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.0.3] - 2026-06-09
+## [0.0.3] - 2026-06-10
 
 ### Fixed
 
+- The first file in the "uncommitted changes" list no longer has its first
+  letter cut off (`pom.xml` was shown as `om.xml`): the leading status
+  character of the first `git status --porcelain` line was being trimmed
+  before parsing.
 - **Windows: stopping an API now kills the whole process tree** ([#3]).
   `mvn.cmd` is a cmd.exe wrapper that spawns Java as a child process; the stop
   button only killed the wrapper, leaving the Spring Boot API running in the
@@ -23,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Clicking Start/Stop now gives immediate feedback: the button shows
+  "Starting…" / "Stopping…" with a spinner and stays that way until the new
+  status is actually displayed. Fetch, Update, and branch switching got the
+  same treatment, and disabled/pressed buttons now have visual states.
 - On Windows, started APIs no longer pop up a separate command prompt window
   (`CREATE_NO_WINDOW`); their output was already captured in the log view.
 - Fatal startup errors (e.g. port 8080 already in use) are now written to
@@ -36,8 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- First backend tests (`backend/config_test.go`), covering config
-  save/load round-trips and recovery from a truncated config file.
+- First backend tests (`backend/config_test.go`, `backend/git_test.go`),
+  covering config save/load round-trips, recovery from a truncated config
+  file, and dirty-file parsing.
 
 ### Security
 

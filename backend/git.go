@@ -50,21 +50,36 @@ type DirtyWorkingTree struct {
 
 func (e *DirtyWorkingTree) Error() string { return "working tree has uncommitted changes" }
 
-func pullBranch(repoPath string) error {
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = repoPath
-	out, err := statusCmd.Output()
-	if err != nil {
-		return fmt.Errorf("git status failed: %w", err)
-	}
+// parseDirtyFiles extracts tracked, changed file paths from
+// `git status --porcelain` output. Each line is "XY path" where XY is a
+// two-character status code (the first may be a significant space, so the
+// output must not be trimmed before splitting). Untracked files (??) don't
+// block pull/checkout and are skipped.
+func parseDirtyFiles(out string) []string {
 	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" || strings.HasPrefix(line, "??") {
+	for _, line := range strings.Split(out, "\n") {
+		if len(line) < 4 || strings.HasPrefix(line, "??") {
 			continue
 		}
-		if len(line) > 3 {
-			files = append(files, strings.TrimSpace(line[3:]))
-		}
+		files = append(files, strings.TrimSpace(line[3:]))
+	}
+	return files
+}
+
+func dirtyFiles(repoPath string) ([]string, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git status failed: %w", err)
+	}
+	return parseDirtyFiles(string(out)), nil
+}
+
+func pullBranch(repoPath string) error {
+	files, err := dirtyFiles(repoPath)
+	if err != nil {
+		return err
 	}
 	if len(files) > 0 {
 		return &DirtyWorkingTree{Files: files}
@@ -78,20 +93,9 @@ func pullBranch(repoPath string) error {
 }
 
 func checkoutBranch(repoPath, branch string) error {
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = repoPath
-	out, err := statusCmd.Output()
+	files, err := dirtyFiles(repoPath)
 	if err != nil {
-		return fmt.Errorf("git status failed: %w", err)
-	}
-	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" || strings.HasPrefix(line, "??") {
-			continue
-		}
-		if len(line) > 3 {
-			files = append(files, strings.TrimSpace(line[3:]))
-		}
+		return err
 	}
 	if len(files) > 0 {
 		return &DirtyWorkingTree{Files: files}

@@ -6,6 +6,15 @@ function basename(path) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path
 }
 
+function Spinner({ light = false }) {
+  return (
+    <span
+      className="spinner"
+      style={{ borderColor: light ? 'rgba(255,255,255,0.4)' : '#d1d5db', borderTopColor: light ? '#fff' : '#6b7280' }}
+    />
+  )
+}
+
 function StatusDot({ status }) {
   return (
     <span style={{
@@ -126,7 +135,9 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   const [fetchError, setFetchError] = useState('')
   const [pulling, setPulling] = useState(false)
   const [pullError, setPullError] = useState(null)
+  const [switching, setSwitching] = useState(false)
   const [checkoutError, setCheckoutError] = useState(null)
+  const [busy, setBusy] = useState('') // 'starting' | 'stopping' | ''
   const [processError, setProcessError] = useState('')
   const [logs, setLogs] = useState([])
   const logBodyRef = useRef(null)
@@ -134,23 +145,16 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   const pendingRef = useRef([])
 
   const loadBranches = useCallback(() => {
-    if (!repo || repo.pathError) return
-    fetch(`${API}/api/repos/${repo.id}/branches`)
+    if (!repo || repo.pathError) return Promise.resolve()
+    return fetch(`${API}/api/repos/${repo.id}/branches`)
       .then(r => r.json())
       .then(setBranches)
       .catch(() => {})
   }, [repo?.id, repo?.pathError])
 
-  useEffect(() => {
-    setBranches([])
-    setFetchError('')
-    setPullError(null)
-    setCheckoutError(null)
-    setProcessError('')
-    setLogs([])
-    pendingRef.current = []
-    loadBranches()
-  }, [repo?.id])
+  // The component is keyed by repo id in App, so state is per-repo and
+  // branches only need loading once per mount.
+  useEffect(() => { loadBranches() }, [loadBranches])
 
   // Drain pending SSE lines into state every 100ms to avoid per-line re-renders
   useEffect(() => {
@@ -209,42 +213,46 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   const handleStartStop = async () => {
     setProcessError('')
     const isRunning = repo.status === 'running'
+    setBusy(isRunning ? 'stopping' : 'starting')
     if (!isRunning) { setLogs([]); pendingRef.current = [] }
     const res = await fetch(`${API}/api/repos/${repo.id}/${isRunning ? 'stop' : 'start'}`, { method: 'POST' })
     if (!res.ok) setProcessError(await res.text())
-    else onStatusChanged()
+    else await onStatusChanged() // keep the pending label until the new status is shown
+    setBusy('')
   }
 
   const handlePull = async () => {
     setPulling(true)
     setPullError(null)
     const res = await fetch(`${API}/api/repos/${repo.id}/pull`, { method: 'POST' })
-    setPulling(false)
-    if (res.ok) { onBranchChanged(); return }
-    if (res.status === 409) setPullError(await res.json())
+    if (res.ok) await onBranchChanged()
+    else if (res.status === 409) setPullError(await res.json())
     else setPullError({ error: await res.text(), files: [] })
+    setPulling(false)
   }
 
   const handleFetch = async () => {
     setFetching(true)
     setFetchError('')
     const res = await fetch(`${API}/api/repos/${repo.id}/fetch`, { method: 'POST' })
-    setFetching(false)
     if (!res.ok) setFetchError(await res.text())
-    else loadBranches()
+    else await loadBranches()
+    setFetching(false)
   }
 
   const handleCheckout = async branch => {
     if (branch === repo.currentBranch) return
+    setSwitching(true)
     setCheckoutError(null)
     const res = await fetch(`${API}/api/repos/${repo.id}/checkout`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ branch }),
     })
-    if (res.ok) { onBranchChanged(); return }
-    if (res.status === 409) setCheckoutError(await res.json())
+    if (res.ok) await onBranchChanged()
+    else if (res.status === 409) setCheckoutError(await res.json())
     else setCheckoutError({ error: await res.text(), files: [] })
+    setSwitching(false)
   }
 
   return (
@@ -262,23 +270,32 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
       ) : (
         <>
           <div style={s.controls}>
-            <select style={s.select} value={repo.currentBranch || ''} onChange={e => handleCheckout(e.target.value)}>
+            <select
+              style={s.select}
+              value={repo.currentBranch || ''}
+              onChange={e => handleCheckout(e.target.value)}
+              disabled={switching}
+            >
               {repo.currentBranch && !branches.includes(repo.currentBranch) && (
                 <option value={repo.currentBranch}>{repo.currentBranch}</option>
               )}
               {branches.map(b => <option key={b} value={b}>{b}</option>)}
             </select>
+            {switching && <Spinner />}
             <button style={s.btn} onClick={handleFetch} disabled={fetching}>
-              {fetching ? 'Fetching…' : 'Fetch'}
+              {fetching ? <>Fetching <Spinner light={false} /></> : 'Fetch'}
             </button>
             <button style={s.btn} onClick={handlePull} disabled={pulling}>
-              {pulling ? 'Updating…' : 'Update'}
+              {pulling ? <>Updating <Spinner light={false} /></> : 'Update'}
             </button>
             <button
               style={{ ...s.btn, ...(repo.status === 'running' ? s.btnStop : s.btnStart) }}
               onClick={handleStartStop}
+              disabled={busy !== ''}
             >
-              {repo.status === 'running' ? 'Stop' : 'Start'}
+              {busy === 'starting' ? <>Starting <Spinner light /></>
+                : busy === 'stopping' ? <>Stopping <Spinner light /></>
+                : repo.status === 'running' ? 'Stop' : 'Start'}
             </button>
             {repo.port > 0 && <span style={s.portBadge}>:{repo.port}</span>}
           </div>
@@ -374,7 +391,7 @@ export default function App() {
         setSelected(prev => prev?.id === id ? null : prev)
       }} />
       <div style={s.right}>
-        <DetailPanel repo={selected} onBranchChanged={fetchRepos} onStatusChanged={fetchRepos} />
+        <DetailPanel key={selected?.id ?? 'none'} repo={selected} onBranchChanged={fetchRepos} onStatusChanged={fetchRepos} />
         <div style={s.addBar}>
           <form onSubmit={addRepo} style={s.form}>
             <input style={s.input} type="text" placeholder="/path/to/repo  or  C:\path\to\repo"

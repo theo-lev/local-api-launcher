@@ -9,3 +9,7 @@ frontend/node_modules/
 dist/
 config.json
 backend/config.json
+*.json.bak
+*.json.tmp
+api-manager-error.log
+.DS_Store
