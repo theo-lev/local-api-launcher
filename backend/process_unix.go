@@ -22,3 +22,5 @@ func isAlive(pid int) bool {
 func killByPid(pid int) {
 	syscall.Kill(-pid, syscall.SIGTERM)
 }
+
+func pauseOnExit() {}

@@ -2,14 +2,27 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
 //go:embed all:dist
 var distFS embed.FS
+
+// fatal logs the error, mirrors it to a file (a double-clicked exe's console
+// vanishes on exit, taking the message with it), then pauses on Windows.
+func fatal(v ...any) {
+	msg := fmt.Sprintln(v...)
+	log.Print(msg)
+	os.WriteFile("api-manager-error.log", []byte(time.Now().Format(time.RFC3339)+" "+msg), 0644)
+	pauseOnExit()
+	os.Exit(1)
+}
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,9 +54,9 @@ func spaHandler(assets fs.FS) http.Handler {
 }
 
 func main() {
-	store, err := NewStore("config.json")
+	store, err := NewStore(configPath())
 	if err != nil {
-		log.Fatal("failed to load config:", err)
+		fatal("failed to load config:", err)
 	}
 
 	manager := NewProcessManager(store)
@@ -117,12 +130,12 @@ func main() {
 
 	frontendFS, err := fs.Sub(distFS, "dist")
 	if err != nil {
-		log.Fatal("failed to load embedded frontend:", err)
+		fatal("failed to load embedded frontend:", err)
 	}
 	mux.Handle("/", spaHandler(frontendFS))
 
 	log.Println("API Manager running at http://localhost:8080")
 	if err := http.ListenAndServe(":8080", corsMiddleware(mux)); err != nil {
-		log.Fatal(err)
+		fatal(err, "(is port 8080 already in use by another program?)")
 	}
 }

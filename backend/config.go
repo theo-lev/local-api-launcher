@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -28,6 +33,20 @@ type Store struct {
 	filePath string
 }
 
+// configPath keeps existing setups working (config.json in the working
+// directory) but anchors fresh ones next to the executable, so launching
+// from another directory doesn't silently start with an empty config.
+func configPath() string {
+	if _, err := os.Stat("config.json"); err == nil {
+		return "config.json"
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "config.json"
+	}
+	return filepath.Join(filepath.Dir(exe), "config.json")
+}
+
 func NewStore(filePath string) (*Store, error) {
 	s := &Store{filePath: filePath}
 	if err := s.load(); err != nil && !os.IsNotExist(err) {
@@ -37,19 +56,47 @@ func NewStore(filePath string) (*Store, error) {
 }
 
 func (s *Store) load() error {
-	raw, err := os.ReadFile(s.filePath)
+	err := s.loadFile(s.filePath)
+	if err == nil {
+		return nil
+	}
+	if bakErr := s.loadFile(s.filePath + ".bak"); bakErr == nil {
+		log.Printf("config file unusable (%v), restored from %s.bak", err, s.filePath)
+		return s.save()
+	}
+	if os.IsNotExist(err) {
+		return err // fresh install, tolerated by NewStore
+	}
+	return fmt.Errorf("config file is corrupt and no usable backup exists (delete %s to start fresh): %w", s.filePath, err)
+}
+
+func (s *Store) loadFile(path string) error {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return errors.New("file is empty")
 	}
 	return json.Unmarshal(raw, &s.data)
 }
 
+// save writes to a temp file and renames it into place: a process killed
+// mid-save can no longer leave a truncated config. The previous good
+// version is kept as .bak for recovery.
 func (s *Store) save() error {
 	raw, err := json.MarshalIndent(s.data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.filePath, raw, 0644)
+	tmp := s.filePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0644); err != nil {
+		return err
+	}
+	if old, err := os.ReadFile(s.filePath); err == nil && len(bytes.TrimSpace(old)) > 0 {
+		os.WriteFile(s.filePath+".bak", old, 0644)
+	}
+	return os.Rename(tmp, s.filePath)
 }
 
 func (s *Store) List() []Repo {
