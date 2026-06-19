@@ -251,8 +251,8 @@ func (h *repoHandlers) logs(w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	snapshot, ch := session.subscribe()
-	defer session.unsubscribe(ch)
+	snapshot, client := session.subscribe()
+	defer session.unsubscribe(client)
 
 	for _, line := range snapshot {
 		fmt.Fprintf(w, "data: %s\n\n", line)
@@ -261,12 +261,15 @@ func (h *repoHandlers) logs(w http.ResponseWriter, r *http.Request, id string) {
 
 	for {
 		select {
-		case line, ok := <-ch:
-			if !ok {
-				return // session closed (process stopped)
+		case <-client.wake:
+			lines, closed := client.take()
+			for _, line := range lines {
+				fmt.Fprintf(w, "data: %s\n\n", line)
 			}
-			fmt.Fprintf(w, "data: %s\n\n", line)
 			flusher.Flush()
+			if closed {
+				return // session ended (process stopped); buffered lines flushed
+			}
 		case <-r.Context().Done():
 			return // client disconnected
 		}
