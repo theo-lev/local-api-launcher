@@ -439,7 +439,7 @@ const s = {
   detailPath: { margin: '0 0 16px', fontSize: 11, color: '#9ca3af' },
 
   controls: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 },
-  select: { fontFamily: 'monospace', fontSize: 13, padding: '5px 8px', border: '1px solid #d1d5db', borderRadius: 4, minWidth: 160 },
+  select: { fontFamily: 'monospace', fontSize: 13, padding: '5px 8px', border: '1px solid #d1d5db', borderRadius: 4, width: '25ch', flexShrink: 0 },
   btn: { padding: '5px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 13, border: '1px solid #d1d5db', borderRadius: 4, background: '#fff' },
   btnStart: { background: '#22c55e', borderColor: '#16a34a', color: '#fff' },
   btnStop: { background: '#ef4444', borderColor: '#dc2626', color: '#fff' },
@@ -452,7 +452,7 @@ const s = {
 
   logPanel: { flex: 1, display: 'flex', flexDirection: 'column', border: '1px solid #e5e7eb', borderRadius: 6, minHeight: 0, marginTop: 10 },
   logHeader: { padding: '6px 12px', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#9ca3af', borderBottom: '1px solid #e5e7eb' },
-  logBody: { flex: 1, overflowY: 'auto', padding: '8px 12px', background: '#0f172a', borderRadius: '0 0 6px 6px' },
+  logBody: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 12px', background: '#0f172a', borderRadius: '0 0 6px 6px' },
   logLine: { color: '#e2e8f0', fontSize: 12, lineHeight: '1.6', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
   logEmpty: { color: '#475569', fontSize: 12 },
 
