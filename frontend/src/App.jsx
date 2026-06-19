@@ -24,7 +24,7 @@ function StatusDot({ status }) {
   )
 }
 
-function SettingsPanel({ onClose }) {
+function SettingsPanel({ onClose, onManageEnvs }) {
   const [mavenPath, setMavenPath] = useState('')
   const [jdkPath, setJdkPath] = useState('')
   const [saved, setSaved] = useState(false)
@@ -88,11 +88,15 @@ function SettingsPanel({ onClose }) {
       <button style={{ ...s.btn, ...(saved ? s.btnSaved : {}) }} onClick={save}>
         {saved ? 'Saved!' : 'Save'}
       </button>
+      <div style={s.settingsDivider} />
+      <label style={s.settingsLabel}>Environments</label>
+      <p style={s.settingsHint}>Named sets of variables injected into APIs you start.</p>
+      <button style={s.btn} onClick={onManageEnvs}>Manage environments…</button>
     </div>
   )
 }
 
-function Sidebar({ repos, selectedId, onSelect, onRemove }) {
+function Sidebar({ repos, selectedId, onSelect, onRemove, environments, activeEnvId, onSwitchEnv, onManageEnvs }) {
   const [showSettings, setShowSettings] = useState(false)
 
   return (
@@ -105,7 +109,20 @@ function Sidebar({ repos, selectedId, onSelect, onRemove }) {
           title="Settings"
         >⚙</button>
       </div>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+      <div style={s.envBar}>
+        <span style={s.envBarLabel}>ENV</span>
+        <select
+          style={s.envSelect}
+          value={activeEnvId}
+          onChange={e => onSwitchEnv(e.target.value)}
+          title="Active environment — applied to APIs you start"
+        >
+          <option value="">None</option>
+          {environments.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+        <button style={s.envManageBtn} onClick={onManageEnvs} title="Manage environments">✎</button>
+      </div>
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onManageEnvs={onManageEnvs} />}
       {repos.length === 0 && !showSettings && <p style={s.empty}>No repos registered.</p>}
       <ul style={s.list}>
         {repos.map(r => (
@@ -261,6 +278,7 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
         <h2 style={s.detailTitle}>{basename(repo.path)}</h2>
         <StatusDot status={repo.status} />
         <span style={s.statusLabel}>{repo.status}</span>
+        {repo.status === 'running' && repo.envName && <span style={s.envBadge}>env: {repo.envName}</span>}
         {repo.reconnected && <span style={s.reconnectedBadge}>reconnected</span>}
       </div>
       <p style={s.detailPath}>{repo.path}</p>
@@ -348,11 +366,154 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   )
 }
 
+// Mirrors the backend parseEnvVars rules just to show a live count.
+function countVars(vars) {
+  return vars.split('\n').filter(line => {
+    const t = line.trim()
+    if (t === '' || t.startsWith('#')) return false
+    const eq = t.indexOf('=')
+    return eq > 0
+  }).length
+}
+
+function EnvModal({ onClose }) {
+  const [envs, setEnvs] = useState([])
+  const [selectedId, setSelectedId] = useState(null) // env id, 'new', or null
+  const [name, setName] = useState('')
+  const [vars, setVars] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback((selectId) =>
+    fetch(`${API}/api/environments`)
+      .then(r => r.json())
+      .then(data => {
+        const list = data.environments || []
+        setEnvs(list)
+        if (selectId !== undefined) {
+          const found = list.find(e => e.id === selectId)
+          if (found) { setSelectedId(found.id); setName(found.name); setVars(found.vars) }
+        }
+      })
+      .catch(() => {}), [])
+
+  useEffect(() => { load() }, [load])
+
+  const selectEnv = env => {
+    setError('')
+    setSelectedId(env.id)
+    setName(env.name)
+    setVars(env.vars)
+  }
+
+  const startNew = () => {
+    setError('')
+    setSelectedId('new')
+    setName('')
+    setVars('')
+  }
+
+  const save = async () => {
+    setError('')
+    if (!name.trim()) { setError('Name is required'); return }
+    setSaving(true)
+    const isNew = selectedId === 'new'
+    const res = await fetch(
+      isNew ? `${API}/api/environments` : `${API}/api/environments/${selectedId}`,
+      {
+        method: isNew ? 'POST' : 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), vars }),
+      }
+    )
+    setSaving(false)
+    if (!res.ok) { setError(await res.text()); return }
+    if (isNew) {
+      const created = await res.json()
+      await load(created.id)
+    } else {
+      await load(selectedId)
+    }
+  }
+
+  const remove = async () => {
+    if (selectedId === 'new') { setSelectedId(null); return }
+    const res = await fetch(`${API}/api/environments/${selectedId}`, { method: 'DELETE' })
+    if (!res.ok) { setError(await res.text()); return }
+    setSelectedId(null)
+    setName('')
+    setVars('')
+    await load()
+  }
+
+  return (
+    <div style={s.modalOverlay} onClick={onClose}>
+      <div style={s.modal} onClick={e => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <span style={s.modalTitle}>Environments</span>
+          <button style={s.closeBtn} onClick={onClose}>✕</button>
+        </div>
+        <div style={s.modalBody}>
+          <div style={s.envList}>
+            {envs.length === 0 && <p style={s.envListEmpty}>No environments yet.</p>}
+            {envs.map(e => (
+              <div
+                key={e.id}
+                style={{ ...s.envListItem, background: e.id === selectedId ? '#eef2ff' : 'transparent' }}
+                onClick={() => selectEnv(e)}
+              >{e.name}</div>
+            ))}
+            <button style={s.envNewBtn} onClick={startNew}>+ New environment</button>
+          </div>
+          <div style={s.envEditor}>
+            {selectedId === null ? (
+              <p style={s.envEditorHint}>Select an environment, or create one.</p>
+            ) : (
+              <>
+                <label style={s.settingsLabel}>Name</label>
+                <input
+                  style={s.settingsInput}
+                  type="text"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  placeholder="e.g. dev, staging, prod"
+                  spellCheck={false}
+                />
+                <label style={s.settingsLabel}>Variables</label>
+                <textarea
+                  style={s.envTextarea}
+                  value={vars}
+                  onChange={e => setVars(e.target.value)}
+                  placeholder={'# one KEY=VALUE per line\nSPRING_PROFILES_ACTIVE=dev\nDB_URL=jdbc:postgresql://localhost:5432/app'}
+                  spellCheck={false}
+                />
+                <p style={s.settingsHint}>{countVars(vars)} variable{countVars(vars) === 1 ? '' : 's'} · {'#'} comments and blank lines ignored</p>
+                {error && <p style={s.errorText}>{error}</p>}
+                <div style={s.envEditorActions}>
+                  <button style={{ ...s.btn, ...s.btnStart }} onClick={save} disabled={saving}>
+                    {saving ? <>Saving <Spinner light /></> : 'Save'}
+                  </button>
+                  <button style={{ ...s.btn, ...s.btnDanger }} onClick={remove}>
+                    {selectedId === 'new' ? 'Cancel' : 'Delete'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [repos, setRepos] = useState([])
   const [selected, setSelected] = useState(null)
   const [path, setPath] = useState('')
   const [addError, setAddError] = useState('')
+  const [environments, setEnvironments] = useState([])
+  const [activeEnvId, setActiveEnvId] = useState('')
+  const [showEnvModal, setShowEnvModal] = useState(false)
 
   const fetchRepos = useCallback(() =>
     fetch(`${API}/api/repos`)
@@ -362,11 +523,31 @@ export default function App() {
         setSelected(prev => prev ? (data.find(r => r.id === prev.id) ?? null) : null)
       }), [])
 
+  const fetchEnvironments = useCallback(() =>
+    fetch(`${API}/api/environments`)
+      .then(r => r.json())
+      .then(data => {
+        setEnvironments(data.environments || [])
+        setActiveEnvId(data.activeId || '')
+      })
+      .catch(() => {}), [])
+
   useEffect(() => {
     fetchRepos()
     const id = setInterval(fetchRepos, 3000)
     return () => clearInterval(id)
   }, [fetchRepos])
+
+  useEffect(() => { fetchEnvironments() }, [fetchEnvironments])
+
+  const switchEnv = async id => {
+    const res = await fetch(`${API}/api/environments/active`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
+    if (res.ok) setActiveEnvId(id)
+  }
 
   const addRepo = async e => {
     e.preventDefault()
@@ -385,11 +566,25 @@ export default function App() {
 
   return (
     <div style={s.layout}>
-      <Sidebar repos={repos} selectedId={selected?.id} onSelect={setSelected} onRemove={async id => {
-        await fetch(`${API}/api/repos/${id}`, { method: 'DELETE' })
-        setRepos(prev => prev.filter(r => r.id !== id))
-        setSelected(prev => prev?.id === id ? null : prev)
-      }} />
+      <Sidebar
+        repos={repos}
+        selectedId={selected?.id}
+        onSelect={setSelected}
+        environments={environments}
+        activeEnvId={activeEnvId}
+        onSwitchEnv={switchEnv}
+        onManageEnvs={() => setShowEnvModal(true)}
+        onRemove={async id => {
+          await fetch(`${API}/api/repos/${id}`, { method: 'DELETE' })
+          setRepos(prev => prev.filter(r => r.id !== id))
+          setSelected(prev => prev?.id === id ? null : prev)
+        }}
+      />
+      {showEnvModal && (
+        <EnvModal
+          onClose={() => { setShowEnvModal(false); fetchEnvironments() }}
+        />
+      )}
       <div style={s.right}>
         <DetailPanel key={selected?.id ?? 'none'} repo={selected} onBranchChanged={fetchRepos} onStatusChanged={fetchRepos} />
         <div style={s.addBar}>
@@ -419,7 +614,29 @@ const s = {
   settingsLabel: { display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4 },
   settingsInput: { width: '100%', boxSizing: 'border-box', padding: '5px 8px', fontFamily: 'monospace', fontSize: 12, border: '1px solid #d1d5db', borderRadius: 4, marginBottom: 4, outline: 'none' },
   settingsHint: { fontSize: 10, color: '#9ca3af', margin: '0 0 8px', lineHeight: 1.5 },
+  settingsDivider: { borderTop: '1px solid #e5e7eb', margin: '14px 0 12px' },
   btnSaved: { background: '#22c55e', borderColor: '#16a34a', color: '#fff' },
+
+  envBar: { display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderBottom: '1px solid #e5e7eb', background: '#fafafa' },
+  envBarLabel: { fontSize: 10, fontWeight: 'bold', color: '#9ca3af', letterSpacing: 0.5 },
+  envSelect: { flex: 1, fontFamily: 'monospace', fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 4, background: '#fff', minWidth: 0 },
+  envManageBtn: { background: 'none', border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer', color: '#6b7280', fontSize: 12, padding: '3px 7px', lineHeight: 1 },
+  envBadge: { fontSize: 11, color: '#4338ca', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 4, padding: '2px 6px' },
+
+  modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 },
+  modal: { width: 640, maxWidth: '92vw', maxHeight: '85vh', background: '#fff', borderRadius: 8, boxShadow: '0 10px 40px rgba(0,0,0,0.25)', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  modalHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid #e5e7eb' },
+  modalTitle: { fontSize: 13, fontWeight: 'bold', textTransform: 'uppercase', color: '#374151', letterSpacing: 0.5 },
+  modalBody: { display: 'flex', minHeight: 0, flex: 1 },
+  envList: { width: 180, borderRight: '1px solid #e5e7eb', padding: 8, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 },
+  envListEmpty: { color: '#9ca3af', fontSize: 12, padding: '4px 8px', margin: 0 },
+  envListItem: { padding: '6px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  envNewBtn: { marginTop: 6, background: 'none', border: '1px dashed #d1d5db', borderRadius: 4, cursor: 'pointer', color: '#6b7280', fontSize: 12, padding: '6px 8px' },
+  envEditor: { flex: 1, padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column' },
+  envEditorHint: { color: '#9ca3af', fontSize: 13, margin: 'auto', textAlign: 'center' },
+  envTextarea: { width: '100%', boxSizing: 'border-box', minHeight: 220, resize: 'vertical', padding: '8px 10px', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5, border: '1px solid #d1d5db', borderRadius: 4, marginBottom: 4, outline: 'none', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
+  envEditorActions: { display: 'flex', gap: 8, marginTop: 6 },
+  btnDanger: { background: '#fff', borderColor: '#fca5a5', color: '#dc2626' },
 
   empty: { padding: '12px 16px', color: '#aaa', fontSize: 12, margin: 0 },
   list: { listStyle: 'none', padding: 0, margin: 0, overflowY: 'auto', flex: 1 },

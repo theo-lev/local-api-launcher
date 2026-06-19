@@ -36,6 +36,7 @@ A `config.json` file is created next to the binary on first run to persist your 
 - **Register repos** — add any local path that contains a `pom.xml`
 - **Branch management** — fetch remote branches and switch with one click; blocked on uncommitted changes with a list of dirty files shown
 - **Start / Stop** — runs `mvn spring-boot:run -DskipTests` in the repo directory
+- **Environments** — define named sets of `KEY=VALUE` variables, pick the active one, and switch sets when you change context; the active set is injected into every API you start, and each running API shows which environment it was started under
 - **Live logs** — stdout and stderr streamed in real time via SSE; up to 2000 lines buffered
 - **Port display** — reads `server.port` from `application.yml` automatically
 - **Maven path** — configure a custom `mvn` executable path in Settings (⚙) if Maven is not on your `PATH`

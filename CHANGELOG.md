@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] - 2026-06-19
+
+### Added
+
+- **Environments** — define named sets of environment variables and pick which
+  one is active. The active set's variables are injected into every API you
+  start, on top of your inherited shell environment (the set overrides it), with
+  `JAVA_HOME` from the JDK path still winning last. Switch the active set from
+  the sidebar; manage sets (create/rename/edit/delete) in a dedicated editor.
+  Variables are authored in dotenv style (`KEY=VALUE` per line, `#` comments).
+  Switching is non-destructive: running APIs keep the environment they were
+  started under, shown as a badge, and pick up a new set only on restart. The
+  launched environment is persisted, so the badge survives an app restart and
+  reconnect. `config.json` gains `envSets` / `activeEnvId`, and the `pids` map
+  now records the launch environment (old `pids` files are migrated on load).
+
 ## [0.0.3] - 2026-06-10
 
 ### Fixed
@@ -82,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform builds (macOS, Linux, Windows) via `build.sh` / `build.bat`.
 
 [#3]: https://github.com/theo-lev/local-api-launcher/issues/3
+[Unreleased]: https://github.com/theo-lev/local-api-launcher/compare/0.0.3...HEAD
 [0.0.3]: https://github.com/theo-lev/local-api-launcher/compare/0.0.2...0.0.3
 [0.0.2]: https://github.com/theo-lev/local-api-launcher/compare/0.0.1...0.0.2
 [0.0.1]: https://github.com/theo-lev/local-api-launcher/releases/tag/0.0.1

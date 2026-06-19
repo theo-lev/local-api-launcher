@@ -18,6 +18,7 @@ type RepoInfo struct {
 	Port          int    `json:"port"`
 	PathError     bool   `json:"pathError,omitempty"`
 	Reconnected   bool   `json:"reconnected,omitempty"`
+	EnvName       string `json:"envName,omitempty"`
 }
 
 type repoHandlers struct {
@@ -36,6 +37,7 @@ func (h *repoHandlers) enrich(r Repo) RepoInfo {
 	if h.manager.IsRunning(r.ID) {
 		info.Status = "running"
 		info.Reconnected = h.manager.IsReconnected(r.ID)
+		_, info.EnvName = h.manager.RunningEnv(r.ID)
 	}
 	if _, err := os.Stat(r.Path); os.IsNotExist(err) {
 		info.PathError = true
@@ -192,7 +194,8 @@ func (h *repoHandlers) start(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	settings := h.store.GetSettings()
-	if err := h.manager.Start(id, repo.Path, settings.MavenPath, settings.JdkPath); err != nil {
+	envID, envName, vars := h.activeEnv()
+	if err := h.manager.Start(id, repo.Path, settings.MavenPath, settings.JdkPath, envID, envName, vars); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}

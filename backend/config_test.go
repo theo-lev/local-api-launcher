@@ -36,7 +36,7 @@ func TestRecoverFromBackupWhenTruncated(t *testing.T) {
 	if err := s.Add(Repo{ID: "abc", Path: "/some/path"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StorePid("abc", 1234); err != nil {
+	if err := s.StorePid("abc", ProcInfo{Pid: 1234}); err != nil {
 		t.Fatal(err)
 	}
 

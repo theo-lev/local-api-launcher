@@ -14,6 +14,8 @@ type managedProcess struct {
 	cmd         *exec.Cmd
 	pid         int
 	reconnected bool
+	envID       string
+	envName     string
 }
 
 type ProcessManager struct {
@@ -41,7 +43,7 @@ func mavenExe(configured string) string {
 	return "mvn"
 }
 
-func (pm *ProcessManager) Start(id, repoPath, mavenPath, jdkPath string) error {
+func (pm *ProcessManager) Start(id, repoPath, mavenPath, jdkPath, envID, envName string, envVars []string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if _, ok := pm.procs[id]; ok {
@@ -50,8 +52,16 @@ func (pm *ProcessManager) Start(id, repoPath, mavenPath, jdkPath string) error {
 
 	cmd := exec.Command(mavenExe(mavenPath), "spring-boot:run", "-DskipTests")
 	cmd.Dir = repoPath
-	if jdkPath != "" {
-		cmd.Env = append(os.Environ(), "JAVA_HOME="+jdkPath)
+	// Build the child env only when we have something to add, so the plain
+	// "None + no JDK" case still inherits the parent env unchanged. Order
+	// matters: active-set vars override the inherited env, and JAVA_HOME from
+	// jdkPath is appended last so it wins over a set's JAVA_HOME.
+	if len(envVars) > 0 || jdkPath != "" {
+		env := append(os.Environ(), envVars...)
+		if jdkPath != "" {
+			env = append(env, "JAVA_HOME="+jdkPath)
+		}
+		cmd.Env = env
 	}
 	setProcAttr(cmd)
 
@@ -71,8 +81,8 @@ func (pm *ProcessManager) Start(id, repoPath, mavenPath, jdkPath string) error {
 		delete(pm.sessions, id)
 		return err
 	}
-	pm.procs[id] = &managedProcess{cmd: cmd, pid: cmd.Process.Pid}
-	pm.store.StorePid(id, cmd.Process.Pid)
+	pm.procs[id] = &managedProcess{cmd: cmd, pid: cmd.Process.Pid, envID: envID, envName: envName}
+	pm.store.StorePid(id, ProcInfo{Pid: cmd.Process.Pid, EnvID: envID, EnvName: envName})
 
 	go pipeLines(stdout, session)
 	go pipeLines(stderr, session)
@@ -106,10 +116,21 @@ func (pm *ProcessManager) Stop(id string) error {
 	return nil
 }
 
-func (pm *ProcessManager) Reconnect(id string, pid int) {
+func (pm *ProcessManager) Reconnect(id string, pid int, envID, envName string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	pm.procs[id] = &managedProcess{pid: pid, reconnected: true}
+	pm.procs[id] = &managedProcess{pid: pid, reconnected: true, envID: envID, envName: envName}
+}
+
+// RunningEnv returns the environment id and name a running process was launched
+// under, or empty strings if it isn't tracked.
+func (pm *ProcessManager) RunningEnv(id string) (string, string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if proc, ok := pm.procs[id]; ok {
+		return proc.envID, proc.envName
+	}
+	return "", ""
 }
 
 func (pm *ProcessManager) IsRunning(id string) bool {

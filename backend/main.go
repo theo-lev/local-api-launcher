@@ -60,9 +60,9 @@ func main() {
 	}
 
 	manager := NewProcessManager(store)
-	for id, pid := range store.GetPids() {
-		if isAlive(pid) {
-			manager.Reconnect(id, pid)
+	for id, info := range store.GetPids() {
+		if isAlive(info.Pid) {
+			manager.Reconnect(id, info.Pid, info.EnvID, info.EnvName)
 		} else {
 			store.RemovePid(id)
 		}
@@ -84,6 +84,31 @@ func main() {
 			h.putSettings(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/environments", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			h.listEnvs(w, r)
+		case http.MethodPost:
+			h.createEnv(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/environments/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/api/environments/")
+		switch {
+		case r.Method == http.MethodPut && id == "active":
+			h.setActiveEnv(w, r)
+		case r.Method == http.MethodPut && id != "":
+			h.updateEnv(w, r, id)
+		case r.Method == http.MethodDelete && id != "":
+			h.deleteEnv(w, r, id)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
 		}
 	})
 
