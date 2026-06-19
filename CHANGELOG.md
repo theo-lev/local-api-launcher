@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.5] - 2026-06-19
+
+### Fixed
+
+- **Live logs no longer stop updating during bursts of output.** Each log
+  viewer (SSE subscriber) had a small 256-slot buffered channel written with a
+  non-blocking send, so once the browser couldn't drain it fast enough the
+  buffer filled and every further line was silently dropped — the stream stayed
+  open but appeared frozen. Subscribers now get a per-client queue that is
+  drained in batches and bounded to the same 2000-line retention as the session
+  itself, so a slow reader can fall behind and catch up without losing lines,
+  while the producer (and through it the child process) is never blocked. The
+  final lines emitted as a process exits are also flushed before the stream
+  closes, instead of being lost when the session ended.
+
 ## [0.0.4] - 2026-06-19
 
 ### Added
@@ -98,7 +113,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform builds (macOS, Linux, Windows) via `build.sh` / `build.bat`.
 
 [#3]: https://github.com/theo-lev/local-api-launcher/issues/3
-[Unreleased]: https://github.com/theo-lev/local-api-launcher/compare/0.0.3...HEAD
+[Unreleased]: https://github.com/theo-lev/local-api-launcher/compare/0.0.5...HEAD
+[0.0.5]: https://github.com/theo-lev/local-api-launcher/compare/0.0.4...0.0.5
+[0.0.4]: https://github.com/theo-lev/local-api-launcher/compare/0.0.3...0.0.4
 [0.0.3]: https://github.com/theo-lev/local-api-launcher/compare/0.0.2...0.0.3
 [0.0.2]: https://github.com/theo-lev/local-api-launcher/compare/0.0.1...0.0.2
 [0.0.1]: https://github.com/theo-lev/local-api-launcher/releases/tag/0.0.1
