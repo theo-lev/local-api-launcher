@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-echo "Starting backend on :8080..."
+echo "Starting backend (default http://127.0.0.1:9000)..."
 cd "$ROOT/backend"
 go run . &
 BACKEND_PID=$!

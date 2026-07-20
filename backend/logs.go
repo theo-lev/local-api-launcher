@@ -4,11 +4,17 @@ import "sync"
 
 const maxLogLines = 2000
 
+type logEntry struct {
+	id   uint64
+	line string
+}
+
 type LogSession struct {
 	mu      sync.Mutex
-	lines   []string
+	lines   []logEntry
 	clients map[*logClient]struct{}
 	closed  bool
+	nextID  uint64
 }
 
 // logClient is one subscriber's outbound queue. Lines are appended without
@@ -17,7 +23,7 @@ type LogSession struct {
 // nor silently drop lines the way a small fixed-size channel did.
 type logClient struct {
 	mu     sync.Mutex
-	buf    []string
+	buf    []logEntry
 	closed bool
 	wake   chan struct{} // cap 1; signals "lines buffered or session closed"
 }
@@ -29,12 +35,14 @@ func newLogSession() *LogSession {
 func (s *LogSession) append(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lines = append(s.lines, line)
+	s.nextID++
+	entry := logEntry{id: s.nextID, line: line}
+	s.lines = append(s.lines, entry)
 	if len(s.lines) > maxLogLines {
 		s.lines = s.lines[len(s.lines)-maxLogLines:]
 	}
 	for c := range s.clients {
-		c.push(line)
+		c.push(entry)
 	}
 }
 
@@ -42,9 +50,9 @@ func (s *LogSession) append(line string) {
 // blocks. The queue is bounded by maxLogLines (matching the session's own
 // retention): a reader that falls that far behind drops its oldest lines,
 // which is no worse than what a fresh reconnect would have replayed anyway.
-func (c *logClient) push(line string) {
+func (c *logClient) push(entry logEntry) {
 	c.mu.Lock()
-	c.buf = append(c.buf, line)
+	c.buf = append(c.buf, entry)
 	if len(c.buf) > maxLogLines {
 		c.buf = c.buf[len(c.buf)-maxLogLines:]
 	}
@@ -60,22 +68,30 @@ func (c *logClient) signal() {
 }
 
 // take drains all buffered lines and reports whether the session has closed.
-func (c *logClient) take() (lines []string, closed bool) {
+func (c *logClient) take() (lines []logEntry, closed bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	lines, c.buf = c.buf, nil
 	return lines, c.closed
 }
 
-// subscribe returns a snapshot of buffered lines and a live client for future
-// lines. The snapshot and registration happen atomically under the lock, so no
-// line can slip between the two (no gaps, no duplicates).
-func (s *LogSession) subscribe() ([]string, *logClient) {
+// subscribe returns buffered entries newer than afterID and a live client for
+// future entries. The snapshot and registration happen atomically under the
+// lock, so no entry can slip between the two (no gaps, no duplicates). A zero
+// cursor is the initial connection and receives the complete retained history.
+func (s *LogSession) subscribe(afterID uint64) ([]logEntry, *logClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := &logClient{wake: make(chan struct{}, 1)}
-	snap := make([]string, len(s.lines))
-	copy(snap, s.lines)
+	first := len(s.lines)
+	for i, entry := range s.lines {
+		if entry.id > afterID {
+			first = i
+			break
+		}
+	}
+	snap := make([]logEntry, len(s.lines)-first)
+	copy(snap, s.lines[first:])
 	if s.closed {
 		c.closed = true
 		c.signal() // let the handler flush the snapshot, then exit

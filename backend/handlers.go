@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 )
 
 type RepoInfo struct {
@@ -250,26 +252,50 @@ func (h *repoHandlers) logs(w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	snapshot, client := session.subscribe()
+	// EventSource sends Last-Event-ID on its own reconnects. The query cursor is
+	// also accepted because the UI creates a fresh EventSource after an error.
+	afterID := uint64(0)
+	cursor := r.URL.Query().Get("after")
+	if cursor == "" {
+		cursor = r.Header.Get("Last-Event-ID")
+	}
+	if cursor != "" {
+		afterID, _ = strconv.ParseUint(cursor, 10, 64)
+	}
+
+	snapshot, client := session.subscribe(afterID)
 	defer session.unsubscribe(client)
 
-	for _, line := range snapshot {
-		fmt.Fprintf(w, "data: %s\n\n", line)
+	for _, entry := range snapshot {
+		if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", entry.id, entry.line); err != nil {
+			return
+		}
 	}
 	flusher.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
 	for {
 		select {
 		case <-client.wake:
-			lines, closed := client.take()
-			for _, line := range lines {
-				fmt.Fprintf(w, "data: %s\n\n", line)
+			entries, closed := client.take()
+			for _, entry := range entries {
+				if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", entry.id, entry.line); err != nil {
+					return
+				}
 			}
 			flusher.Flush()
 			if closed {
 				return // session ended (process stopped); buffered lines flushed
 			}
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case <-r.Context().Done():
 			return // client disconnected
 		}

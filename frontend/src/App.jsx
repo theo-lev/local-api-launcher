@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 
 const API = ''
+const MAX_LOG_LINES = 2000
 
 function basename(path) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path
@@ -96,57 +97,7 @@ function SettingsPanel({ onClose, onManageEnvs }) {
   )
 }
 
-function Sidebar({ repos, selectedId, onSelect, onRemove, environments, activeEnvId, onSwitchEnv, onManageEnvs }) {
-  const [showSettings, setShowSettings] = useState(false)
-
-  return (
-    <aside style={s.sidebar}>
-      <div style={s.sidebarHeader}>
-        <span>Repos</span>
-        <button
-          style={s.gearBtn}
-          onClick={() => setShowSettings(v => !v)}
-          title="Settings"
-        >⚙</button>
-      </div>
-      <div style={s.envBar}>
-        <span style={s.envBarLabel}>ENV</span>
-        <select
-          style={s.envSelect}
-          value={activeEnvId}
-          onChange={e => onSwitchEnv(e.target.value)}
-          title="Active environment — applied to APIs you start"
-        >
-          <option value="">None</option>
-          {environments.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-        </select>
-        <button style={s.envManageBtn} onClick={onManageEnvs} title="Manage environments">✎</button>
-      </div>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onManageEnvs={onManageEnvs} />}
-      {repos.length === 0 && !showSettings && <p style={s.empty}>No repos registered.</p>}
-      <ul style={s.list}>
-        {repos.map(r => (
-          <li
-            key={r.id}
-            style={{ ...s.item, background: r.id === selectedId ? '#f5f5f5' : 'transparent' }}
-            onClick={() => onSelect(r)}
-          >
-            <div style={s.itemRow}>
-              <StatusDot status={r.status} />
-              <span style={s.repoName}>{basename(r.path)}</span>
-              <button style={s.removeBtn} onClick={e => { e.stopPropagation(); onRemove(r.id) }}>✕</button>
-            </div>
-            {r.pathError
-              ? <span style={{ ...s.branchLabel, color: '#ef4444' }}>path not found</span>
-              : <span style={s.branchLabel}>{r.currentBranch || '—'}</span>}
-          </li>
-        ))}
-      </ul>
-    </aside>
-  )
-}
-
-function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
+function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged, onLogReset }) {
   const [branches, setBranches] = useState([])
   const [fetching, setFetching] = useState(false)
   const [fetchError, setFetchError] = useState('')
@@ -156,85 +107,25 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
   const [checkoutError, setCheckoutError] = useState(null)
   const [busy, setBusy] = useState('') // 'starting' | 'stopping' | ''
   const [processError, setProcessError] = useState('')
-  const [logs, setLogs] = useState([])
-  const logBodyRef = useRef(null)
-  const esRef = useRef(null)
-  const pendingRef = useRef([])
 
   const loadBranches = useCallback(() => {
-    if (!repo || repo.pathError) return Promise.resolve()
+    if (repo.pathError) return Promise.resolve()
     return fetch(`${API}/api/repos/${repo.id}/branches`)
       .then(r => r.json())
       .then(setBranches)
       .catch(() => {})
-  }, [repo?.id, repo?.pathError])
+  }, [repo.id, repo.pathError])
 
-  // The component is keyed by repo id in App, so state is per-repo and
-  // branches only need loading once per mount.
   useEffect(() => { loadBranches() }, [loadBranches])
-
-  // Drain pending SSE lines into state every 100ms to avoid per-line re-renders
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (pendingRef.current.length === 0) return
-      const lines = pendingRef.current.splice(0)
-      setLogs(prev => {
-        const next = [...prev, ...lines]
-        return next.length > 2000 ? next.slice(-2000) : next
-      })
-    }, 100)
-    return () => clearInterval(id)
-  }, [])
-
-  // Auto-scroll to bottom when logs update
-  useEffect(() => {
-    const el = logBodyRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [logs])
-
-  // SSE connection with auto-reconnect on error
-  useEffect(() => {
-    if (!repo || repo.status !== 'running') {
-      esRef.current?.close()
-      esRef.current = null
-      return
-    }
-
-    let active = true
-    let es
-    let retryTimer
-
-    function connect() {
-      es = new EventSource(`${API}/api/repos/${repo.id}/logs`)
-      esRef.current = es
-      es.onmessage = e => { pendingRef.current.push(e.data) }
-      es.onerror = () => {
-        es.close()
-        if (active) retryTimer = setTimeout(connect, 2000)
-      }
-    }
-    connect()
-
-    return () => {
-      active = false
-      clearTimeout(retryTimer)
-      es?.close()
-      esRef.current = null
-    }
-  }, [repo?.id, repo?.status])
-
-  if (!repo) {
-    return <div style={{ ...s.detail, ...s.detailEmpty }}><span style={{ color: '#aaa' }}>Select a repo to manage it.</span></div>
-  }
 
   const handleStartStop = async () => {
     setProcessError('')
     const isRunning = repo.status === 'running'
     setBusy(isRunning ? 'stopping' : 'starting')
-    if (!isRunning) { setLogs([]); pendingRef.current = [] }
+    if (!isRunning) onLogReset(repo.id)
     const res = await fetch(`${API}/api/repos/${repo.id}/${isRunning ? 'stop' : 'start'}`, { method: 'POST' })
     if (!res.ok) setProcessError(await res.text())
-    else await onStatusChanged() // keep the pending label until the new status is shown
+    else await onReposChanged()
     setBusy('')
   }
 
@@ -242,7 +133,7 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
     setPulling(true)
     setPullError(null)
     const res = await fetch(`${API}/api/repos/${repo.id}/pull`, { method: 'POST' })
-    if (res.ok) await onBranchChanged()
+    if (res.ok) await onReposChanged()
     else if (res.status === 409) setPullError(await res.json())
     else setPullError({ error: await res.text(), files: [] })
     setPulling(false)
@@ -266,30 +157,55 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ branch }),
     })
-    if (res.ok) await onBranchChanged()
+    if (res.ok) await onReposChanged()
     else if (res.status === 409) setCheckoutError(await res.json())
     else setCheckoutError({ error: await res.text(), files: [] })
     setSwitching(false)
   }
 
   return (
-    <div style={s.detail}>
-      <div style={s.detailHeader}>
-        <h2 style={s.detailTitle}>{basename(repo.path)}</h2>
+    <li
+      className={`api-row${selected ? ' api-row-selected' : ''}`}
+      style={{ ...s.apiRow, ...(selected ? s.apiRowSelected : {}) }}
+      onClick={() => onSelect(repo)}
+    >
+      <div style={s.apiRowTop}>
         <StatusDot status={repo.status} />
+        <strong style={s.apiName}>{basename(repo.path)}</strong>
         <span style={s.statusLabel}>{repo.status}</span>
-        {repo.status === 'running' && repo.envName && <span style={s.envBadge}>env: {repo.envName}</span>}
+        {repo.status === 'running' && repo.envName && <span style={s.envBadge}>{repo.envName}</span>}
         {repo.reconnected && <span style={s.reconnectedBadge}>reconnected</span>}
+        {repo.port > 0 && <span style={s.portBadge}>:{repo.port}</span>}
+        <span style={s.apiRowSpacer} />
+        <button
+          style={s.removeBtn}
+          onClick={e => {
+            e.stopPropagation()
+            const name = basename(repo.path)
+            if (window.confirm(`Remove ${name} from API Manager?\n\nThe repository files will not be deleted.`)) {
+              onRemove(repo.id)
+            }
+          }}
+          title={`Remove ${basename(repo.path)}`}
+          aria-label={`Remove ${basename(repo.path)}`}
+        >✕</button>
+        <button
+          style={{ ...s.logsBtn, ...(selected ? s.logsBtnActive : {}) }}
+          onClick={e => { e.stopPropagation(); onSelect(repo) }}
+          aria-pressed={selected}
+        >
+          {selected ? 'Viewing logs' : 'Logs →'}
+        </button>
       </div>
-      <p style={s.detailPath}>{repo.path}</p>
+      <div style={s.apiPath} title={repo.path}>{repo.path}</div>
 
       {repo.pathError ? (
-        <p style={s.errorText}>Path no longer exists on disk.</p>
+        <p style={s.rowError}>Path no longer exists on disk.</p>
       ) : (
         <>
-          <div style={s.controls}>
+          <div style={s.rowControls} onClick={e => e.stopPropagation()}>
             <select
-              style={s.select}
+              style={s.rowSelect}
               value={repo.currentBranch || ''}
               onChange={e => handleCheckout(e.target.value)}
               disabled={switching}
@@ -300,14 +216,14 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
               {branches.map(b => <option key={b} value={b}>{b}</option>)}
             </select>
             {switching && <Spinner />}
-            <button style={s.btn} onClick={handleFetch} disabled={fetching}>
+            <button style={s.rowBtn} onClick={handleFetch} disabled={fetching}>
               {fetching ? <>Fetching <Spinner light={false} /></> : 'Fetch'}
             </button>
-            <button style={s.btn} onClick={handlePull} disabled={pulling}>
+            <button style={s.rowBtn} onClick={handlePull} disabled={pulling}>
               {pulling ? <>Updating <Spinner light={false} /></> : 'Update'}
             </button>
             <button
-              style={{ ...s.btn, ...(repo.status === 'running' ? s.btnStop : s.btnStart) }}
+              style={{ ...s.rowBtn, ...(repo.status === 'running' ? s.btnStop : s.btnStart) }}
               onClick={handleStartStop}
               disabled={busy !== ''}
             >
@@ -315,14 +231,13 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
                 : busy === 'stopping' ? <>Stopping <Spinner light /></>
                 : repo.status === 'running' ? 'Stop' : 'Start'}
             </button>
-            {repo.port > 0 && <span style={s.portBadge}>:{repo.port}</span>}
           </div>
 
-          {fetchError && <p style={s.errorText}>{fetchError}</p>}
-          {processError && <p style={s.errorText}>{processError}</p>}
+          {fetchError && <p style={s.rowError}>{fetchError}</p>}
+          {processError && <p style={s.rowError}>{processError}</p>}
 
           {pullError && (
-            <div style={s.dirtyBox}>
+            <div style={s.rowDirtyBox}>
               <p style={s.dirtyTitle}>
                 {pullError.error === 'dirty'
                   ? 'Cannot pull — uncommitted changes:'
@@ -337,7 +252,7 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
           )}
 
           {checkoutError && (
-            <div style={s.dirtyBox}>
+            <div style={s.rowDirtyBox}>
               <p style={s.dirtyTitle}>
                 {checkoutError.error === 'dirty'
                   ? 'Cannot switch branch — uncommitted changes:'
@@ -351,18 +266,153 @@ function DetailPanel({ repo, onBranchChanged, onStatusChanged }) {
             </div>
           )}
 
-          <div style={s.logPanel}>
-            <div style={s.logHeader}>Logs</div>
-            <div ref={logBodyRef} style={s.logBody}>
-              {logs.length === 0
-                ? <span style={s.logEmpty}>{repo.status === 'running' ? 'Waiting for output…' : 'Start the service to see logs.'}</span>
-                : logs.map((line, i) => <div key={i} style={s.logLine}>{line}</div>)
-              }
-            </div>
-          </div>
         </>
       )}
-    </div>
+    </li>
+  )
+}
+
+function ApiPane({ repos, selectedId, onSelect, onRemove, onReposChanged, onLogReset, environments, activeEnvId, onSwitchEnv, onManageEnvs, path, onPathChange, onAddRepo, addError }) {
+  const [showSettings, setShowSettings] = useState(false)
+
+  return (
+    <aside className="api-pane" style={s.apiPane}>
+      <div style={s.paneHeader}>
+        <div>
+          <span style={s.paneEyebrow}>Workspace</span>
+          <h1 style={s.paneTitle}>APIs</h1>
+        </div>
+        <button style={s.gearBtn} onClick={() => setShowSettings(v => !v)} title="Settings">⚙</button>
+      </div>
+      <div style={s.envBar}>
+        <span style={s.envBarLabel}>Environment</span>
+        <select style={s.envSelect} value={activeEnvId} onChange={e => onSwitchEnv(e.target.value)} title="Applied to APIs you start">
+          <option value="">None</option>
+          {environments.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+        <button style={s.envManageBtn} onClick={onManageEnvs} title="Manage environments">Manage</button>
+      </div>
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onManageEnvs={onManageEnvs} />}
+      <ul style={s.apiList}>
+        {repos.length === 0 && <li style={s.empty}>No APIs registered yet.</li>}
+        {repos.map(repo => (
+          <RepoRow
+            key={repo.id}
+            repo={repo}
+            selected={repo.id === selectedId}
+            onSelect={onSelect}
+            onRemove={onRemove}
+            onReposChanged={onReposChanged}
+            onLogReset={onLogReset}
+          />
+        ))}
+      </ul>
+      <div style={s.addBar}>
+        <form onSubmit={onAddRepo} style={s.form}>
+          <input
+            style={s.input}
+            type="text"
+            placeholder="/path/to/repo"
+            value={path}
+            onChange={e => onPathChange(e.target.value)}
+          />
+          <button style={s.btn} type="submit">Add API</button>
+        </form>
+        {addError && <p style={s.errorText}>{addError}</p>}
+      </div>
+    </aside>
+  )
+}
+
+function LogViewer({ repo }) {
+  const [logs, setLogs] = useState([])
+  const logBodyRef = useRef(null)
+  const esRef = useRef(null)
+  const pendingRef = useRef([])
+  const lastEventIdRef = useRef('')
+  const repoId = repo?.id
+  const repoStatus = repo?.status
+  const reconnected = repo?.reconnected
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (pendingRef.current.length === 0) return
+      const lines = pendingRef.current.splice(0)
+      setLogs(prev => {
+        const next = [...prev, ...lines]
+        return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next
+      })
+    }, 100)
+    return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    const el = logBodyRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [logs])
+
+  useEffect(() => {
+    if (!repoId || repoStatus !== 'running' || reconnected) {
+      esRef.current?.close()
+      esRef.current = null
+      return
+    }
+
+    let active = true
+    let es
+    let retryTimer
+
+    function connect() {
+      const cursor = lastEventIdRef.current
+      const suffix = cursor ? `?after=${encodeURIComponent(cursor)}` : ''
+      es = new EventSource(`${API}/api/repos/${repoId}/logs${suffix}`)
+      esRef.current = es
+      es.onmessage = e => {
+        if (e.lastEventId) lastEventIdRef.current = e.lastEventId
+        const pending = pendingRef.current
+        pending.push(e.data)
+        if (pending.length > MAX_LOG_LINES * 2) pending.splice(0, pending.length - MAX_LOG_LINES)
+      }
+      es.onerror = () => {
+        es.close()
+        if (active) retryTimer = setTimeout(connect, 2000)
+      }
+    }
+    connect()
+
+    return () => {
+      active = false
+      clearTimeout(retryTimer)
+      es?.close()
+      esRef.current = null
+    }
+  }, [repoId, repoStatus, reconnected])
+
+  if (!repo) {
+    return <main className="log-viewer" style={{ ...s.logViewer, ...s.logViewerEmpty }}>Select an API to display its logs.</main>
+  }
+
+  const emptyMessage = reconnected
+    ? 'Logs are unavailable for a process reconnected after API Manager restarted.'
+    : repo.status === 'running' ? 'Waiting for output…' : 'Start this API to see live logs.'
+
+  return (
+    <main className="log-viewer" style={s.logViewer}>
+      <header style={s.logViewerHeader}>
+        <div style={s.logViewerTitleRow}>
+          <span style={s.logViewerEyebrow}>Logs</span>
+          <StatusDot status={repo.status} />
+          <span style={s.statusLabel}>{repo.status}</span>
+        </div>
+        <h2 style={s.logViewerTitle}>{basename(repo.path)}</h2>
+        <div style={s.logViewerPath}>{repo.path}</div>
+      </header>
+      <div ref={logBodyRef} style={s.logBody}>
+        {logs.length === 0
+          ? <span style={s.logEmpty}>{emptyMessage}</span>
+          : <pre style={s.logText}>{logs.join('\n')}</pre>}
+      </div>
+    </main>
   )
 }
 
@@ -448,7 +498,7 @@ function EnvModal({ onClose }) {
 
   return (
     <div style={s.modalOverlay} onClick={onClose}>
-      <div style={s.modal} onClick={e => e.stopPropagation()}>
+      <div className="env-modal" style={s.modal} onClick={e => e.stopPropagation()}>
         <div style={s.modalHeader}>
           <span style={s.modalTitle}>Environments</span>
           <button style={s.closeBtn} onClick={onClose}>✕</button>
@@ -514,6 +564,9 @@ export default function App() {
   const [environments, setEnvironments] = useState([])
   const [activeEnvId, setActiveEnvId] = useState('')
   const [showEnvModal, setShowEnvModal] = useState(false)
+  const [paneWidth, setPaneWidth] = useState(null)
+  const [logVersions, setLogVersions] = useState({})
+  const layoutRef = useRef(null)
 
   const fetchRepos = useCallback(() =>
     fetch(`${API}/api/repos`)
@@ -564,117 +617,168 @@ export default function App() {
     setSelected(repo)
   }
 
+  const startResize = e => {
+    if (!layoutRef.current || window.innerWidth <= 900) return
+    e.preventDefault()
+    const divider = e.currentTarget
+    const bounds = layoutRef.current.getBoundingClientRect()
+    const minLeft = Math.min(420, bounds.width - 360)
+    const maxLeft = Math.max(minLeft, bounds.width - 360)
+
+    const resize = event => {
+      const width = Math.min(maxLeft, Math.max(minLeft, event.clientX - bounds.left))
+      setPaneWidth(width)
+    }
+    const finish = () => {
+      divider.removeEventListener('pointermove', resize)
+      divider.removeEventListener('pointerup', finish)
+      divider.removeEventListener('pointercancel', finish)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    divider.setPointerCapture(e.pointerId)
+    divider.addEventListener('pointermove', resize)
+    divider.addEventListener('pointerup', finish)
+    divider.addEventListener('pointercancel', finish)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }
+
+  const resetLogs = id => {
+    setLogVersions(prev => ({ ...prev, [id]: (prev[id] || 0) + 1 }))
+  }
+
+  const removeRepo = async id => {
+    await fetch(`${API}/api/repos/${id}`, { method: 'DELETE' })
+    setRepos(prev => prev.filter(r => r.id !== id))
+    setSelected(prev => prev?.id === id ? null : prev)
+  }
+
   return (
-    <div style={s.layout}>
-      <Sidebar
+    <div
+      ref={layoutRef}
+      className="app-layout"
+      style={{ ...s.layout, '--api-pane-width': paneWidth ? `${paneWidth}px` : '40%' }}
+    >
+      <ApiPane
         repos={repos}
         selectedId={selected?.id}
         onSelect={setSelected}
+        onRemove={removeRepo}
+        onReposChanged={fetchRepos}
+        onLogReset={resetLogs}
         environments={environments}
         activeEnvId={activeEnvId}
         onSwitchEnv={switchEnv}
         onManageEnvs={() => setShowEnvModal(true)}
-        onRemove={async id => {
-          await fetch(`${API}/api/repos/${id}`, { method: 'DELETE' })
-          setRepos(prev => prev.filter(r => r.id !== id))
-          setSelected(prev => prev?.id === id ? null : prev)
-        }}
+        path={path}
+        onPathChange={setPath}
+        onAddRepo={addRepo}
+        addError={addError}
       />
+      <div
+        className="pane-resizer"
+        style={s.paneResizer}
+        onPointerDown={startResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize API list and log viewer"
+      ><span style={s.paneResizerHandle} /></div>
       {showEnvModal && (
         <EnvModal
           onClose={() => { setShowEnvModal(false); fetchEnvironments() }}
         />
       )}
-      <div style={s.right}>
-        <DetailPanel key={selected?.id ?? 'none'} repo={selected} onBranchChanged={fetchRepos} onStatusChanged={fetchRepos} />
-        <div style={s.addBar}>
-          <form onSubmit={addRepo} style={s.form}>
-            <input style={s.input} type="text" placeholder="/path/to/repo  or  C:\path\to\repo"
-              value={path} onChange={e => setPath(e.target.value)} />
-            <button style={s.btn} type="submit">Add repo</button>
-          </form>
-          {addError && <p style={s.errorText}>{addError}</p>}
-        </div>
-      </div>
+      <LogViewer
+        key={`${selected?.id ?? 'none'}:${selected ? (logVersions[selected.id] || 0) : 0}`}
+        repo={selected}
+      />
     </div>
   )
 }
 
 const s = {
-  layout: { display: 'flex', height: '100vh', fontFamily: 'monospace', fontSize: 13, color: '#1a1a1a' },
+  layout: { display: 'flex', height: '100vh', overflow: 'hidden', background: '#f8fafc', fontFamily: 'monospace', fontSize: 13, color: '#172033' },
 
-  sidebar: { width: 240, borderRight: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column', flexShrink: 0 },
-  sidebarHeader: { padding: '12px 16px', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#9ca3af', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
-  gearBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 14, padding: 0, lineHeight: 1 },
+  apiPane: { width: 'var(--api-pane-width)', minWidth: 420, maxWidth: 'calc(100% - 360px)', background: '#fff', display: 'flex', flexDirection: 'column', flexShrink: 0, overflow: 'hidden' },
+  paneHeader: { minHeight: 72, padding: '14px 18px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+  paneEyebrow: { display: 'block', marginBottom: 2, color: '#94a3b8', fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' },
+  paneTitle: { margin: 0, fontSize: 22, lineHeight: 1.1 },
+  gearBtn: { width: 34, height: 34, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', color: '#64748b', fontSize: 16, lineHeight: 1 },
+  paneResizer: { position: 'relative', width: 9, margin: '0 -4px', flexShrink: 0, zIndex: 10, cursor: 'col-resize', touchAction: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+  paneResizerHandle: { display: 'block', width: 1, height: '100%', background: '#dbe2ea' },
 
-  settingsPanel: { borderBottom: '1px solid #e5e7eb', padding: '12px 16px', background: '#fafafa' },
+  settingsPanel: { borderBottom: '1px solid #e5e7eb', padding: '14px 18px', background: '#f8fafc', maxHeight: '45vh', overflowY: 'auto' },
   settingsPanelHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   settingsPanelTitle: { fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#6b7280' },
-  closeBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 11, padding: 0 },
-  settingsLabel: { display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4 },
-  settingsInput: { width: '100%', boxSizing: 'border-box', padding: '5px 8px', fontFamily: 'monospace', fontSize: 12, border: '1px solid #d1d5db', borderRadius: 4, marginBottom: 4, outline: 'none' },
-  settingsHint: { fontSize: 10, color: '#9ca3af', margin: '0 0 8px', lineHeight: 1.5 },
+  closeBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: 14, padding: 4 },
+  settingsLabel: { display: 'block', fontSize: 11, color: '#64748b', marginBottom: 5 },
+  settingsInput: { width: '100%', boxSizing: 'border-box', padding: '8px 10px', fontFamily: 'monospace', fontSize: 12, border: '1px solid #cbd5e1', borderRadius: 5, marginBottom: 5, outline: 'none' },
+  settingsHint: { fontSize: 10, color: '#94a3b8', margin: '0 0 10px', lineHeight: 1.5 },
   settingsDivider: { borderTop: '1px solid #e5e7eb', margin: '14px 0 12px' },
-  btnSaved: { background: '#22c55e', borderColor: '#16a34a', color: '#fff' },
+  btnSaved: { background: '#22c55e', border: '1px solid #16a34a', color: '#fff' },
 
-  envBar: { display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderBottom: '1px solid #e5e7eb', background: '#fafafa' },
-  envBarLabel: { fontSize: 10, fontWeight: 'bold', color: '#9ca3af', letterSpacing: 0.5 },
-  envSelect: { flex: 1, fontFamily: 'monospace', fontSize: 12, padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 4, background: '#fff', minWidth: 0 },
-  envManageBtn: { background: 'none', border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer', color: '#6b7280', fontSize: 12, padding: '3px 7px', lineHeight: 1 },
-  envBadge: { fontSize: 11, color: '#4338ca', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 4, padding: '2px 6px' },
+  envBar: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', borderBottom: '1px solid #e5e7eb', background: '#f8fafc' },
+  envBarLabel: { fontSize: 10, fontWeight: 'bold', color: '#94a3b8', letterSpacing: 0.5, textTransform: 'uppercase' },
+  envSelect: { flex: 1, minWidth: 0, fontFamily: 'monospace', fontSize: 12, padding: '6px 8px', border: '1px solid #cbd5e1', borderRadius: 5, background: '#fff' },
+  envManageBtn: { background: '#fff', border: '1px solid #cbd5e1', borderRadius: 5, cursor: 'pointer', color: '#475569', fontFamily: 'monospace', fontSize: 11, padding: '6px 9px', lineHeight: 1 },
+  envBadge: { fontSize: 10, color: '#4338ca', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 999, padding: '2px 7px' },
 
-  modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 },
-  modal: { width: 640, maxWidth: '92vw', maxHeight: '85vh', background: '#fff', borderRadius: 8, boxShadow: '0 10px 40px rgba(0,0,0,0.25)', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  modalHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid #e5e7eb' },
+  modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 20 },
+  modal: { width: '75vw', height: '80vh', minWidth: 'min(720px, 92vw)', minHeight: 'min(480px, 85vh)', maxWidth: '95vw', maxHeight: '92vh', resize: 'both', background: '#fff', borderRadius: 10, boxShadow: '0 18px 55px rgba(15,23,42,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  modalHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid #e5e7eb' },
   modalTitle: { fontSize: 13, fontWeight: 'bold', textTransform: 'uppercase', color: '#374151', letterSpacing: 0.5 },
   modalBody: { display: 'flex', minHeight: 0, flex: 1 },
-  envList: { width: 180, borderRight: '1px solid #e5e7eb', padding: 8, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 },
+  envList: { width: '30%', minWidth: 210, borderRight: '1px solid #e5e7eb', padding: 12, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 },
   envListEmpty: { color: '#9ca3af', fontSize: 12, padding: '4px 8px', margin: 0 },
-  envListItem: { padding: '6px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  envNewBtn: { marginTop: 6, background: 'none', border: '1px dashed #d1d5db', borderRadius: 4, cursor: 'pointer', color: '#6b7280', fontSize: 12, padding: '6px 8px' },
-  envEditor: { flex: 1, padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column' },
+  envListItem: { padding: '9px 10px', borderRadius: 5, cursor: 'pointer', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  envNewBtn: { marginTop: 8, background: 'none', border: '1px dashed #cbd5e1', borderRadius: 5, cursor: 'pointer', color: '#64748b', fontSize: 12, padding: '9px 10px' },
+  envEditor: { flex: 1, minWidth: 0, padding: 22, overflowY: 'auto', display: 'flex', flexDirection: 'column' },
   envEditorHint: { color: '#9ca3af', fontSize: 13, margin: 'auto', textAlign: 'center' },
-  envTextarea: { width: '100%', boxSizing: 'border-box', minHeight: 220, resize: 'vertical', padding: '8px 10px', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5, border: '1px solid #d1d5db', borderRadius: 4, marginBottom: 4, outline: 'none', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
+  envTextarea: { width: '100%', boxSizing: 'border-box', flex: 1, minHeight: 300, resize: 'vertical', padding: '12px', fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6, border: '1px solid #cbd5e1', borderRadius: 5, marginBottom: 5, outline: 'none', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
   envEditorActions: { display: 'flex', gap: 8, marginTop: 6 },
-  btnDanger: { background: '#fff', borderColor: '#fca5a5', color: '#dc2626' },
+  btnDanger: { background: '#fff', border: '1px solid #fca5a5', color: '#dc2626' },
 
-  empty: { padding: '12px 16px', color: '#aaa', fontSize: 12, margin: 0 },
-  list: { listStyle: 'none', padding: 0, margin: 0, overflowY: 'auto', flex: 1 },
-  item: { padding: '10px 16px', cursor: 'pointer', borderBottom: '1px solid #f3f4f6' },
-  itemRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 },
-  repoName: { fontWeight: 'bold', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  removeBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#d1d5db', fontSize: 11, padding: 0, lineHeight: 1 },
-  branchLabel: { fontSize: 11, color: '#6b7280', paddingLeft: 16 },
-
-  right: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-
-  detail: { flex: 1, padding: '20px 28px', overflowY: 'auto', display: 'flex', flexDirection: 'column' },
-  detailEmpty: { alignItems: 'center', justifyContent: 'center' },
-  detailHeader: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 },
-  detailTitle: { margin: 0, fontSize: 18, fontWeight: 'bold' },
+  empty: { padding: '28px 18px', color: '#94a3b8', fontSize: 12, margin: 0, textAlign: 'center' },
+  apiList: { listStyle: 'none', padding: 0, margin: 0, overflowX: 'hidden', overflowY: 'auto', flex: 1, background: '#f8fafc' },
+  apiRow: { minHeight: 142, padding: '16px 18px', cursor: 'pointer', background: '#fff', borderBottom: '1px solid #e5e7eb', borderLeft: '3px solid transparent', transition: 'background 0.15s ease, border-color 0.15s ease' },
+  apiRowSelected: { background: '#f5f8ff', borderLeft: '3px solid #4f46e5' },
+  apiRowTop: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
+  apiName: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 15 },
+  apiRowSpacer: { flex: 1 },
+  apiPath: { margin: '7px 0 12px 16px', color: '#94a3b8', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  rowControls: { display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', paddingLeft: 16 },
+  rowSelect: { flex: '1 1 180px', minWidth: 140, maxWidth: 280, fontFamily: 'monospace', fontSize: 12, padding: '7px 9px', border: '1px solid #cbd5e1', borderRadius: 5, background: '#fff' },
+  rowBtn: { padding: '7px 11px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 12, border: '1px solid #cbd5e1', borderRadius: 5, background: '#fff', whiteSpace: 'nowrap' },
+  logsBtn: { padding: '6px 9px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 11, color: '#4338ca', background: '#fff', border: '1px solid #a5b4fc', borderRadius: 5, whiteSpace: 'nowrap' },
+  logsBtnActive: { color: '#fff', background: '#4f46e5', border: '1px solid #4f46e5' },
+  removeBtn: { background: 'none', border: 'none', cursor: 'pointer', color: '#cbd5e1', fontSize: 12, padding: 5, lineHeight: 1 },
   statusLabel: { fontSize: 12, color: '#6b7280' },
-  detailPath: { margin: '0 0 16px', fontSize: 11, color: '#9ca3af' },
+  btn: { padding: '7px 13px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 12, border: '1px solid #cbd5e1', borderRadius: 5, background: '#fff' },
+  btnStart: { background: '#22c55e', border: '1px solid #16a34a', color: '#fff' },
+  btnStop: { background: '#ef4444', border: '1px solid #dc2626', color: '#fff' },
+  portBadge: { fontSize: 11, color: '#64748b', background: '#f1f5f9', borderRadius: 999, padding: '2px 7px' },
+  reconnectedBadge: { fontSize: 10, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 999, padding: '2px 7px' },
 
-  controls: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 },
-  select: { fontFamily: 'monospace', fontSize: 13, padding: '5px 8px', border: '1px solid #d1d5db', borderRadius: 4, width: '25ch', flexShrink: 0 },
-  btn: { padding: '5px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 13, border: '1px solid #d1d5db', borderRadius: 4, background: '#fff' },
-  btnStart: { background: '#22c55e', borderColor: '#16a34a', color: '#fff' },
-  btnStop: { background: '#ef4444', borderColor: '#dc2626', color: '#fff' },
-  portBadge: { marginLeft: 4, fontSize: 12, color: '#6b7280' },
-  reconnectedBadge: { fontSize: 11, color: '#f97316', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 4, padding: '2px 6px' },
-
-  dirtyBox: { background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 4, padding: '10px 14px', marginBottom: 10 },
+  rowError: { color: '#dc2626', margin: '9px 0 0 16px', fontSize: 11 },
+  rowDirtyBox: { background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 5, padding: '9px 11px', margin: '10px 0 0 16px' },
   dirtyTitle: { margin: '0 0 6px', color: '#dc2626', fontWeight: 'bold', fontSize: 12 },
   dirtyList: { margin: 0, paddingLeft: 18, color: '#dc2626', fontSize: 12 },
 
-  logPanel: { flex: 1, display: 'flex', flexDirection: 'column', border: '1px solid #e5e7eb', borderRadius: 6, minHeight: 0, marginTop: 10 },
-  logHeader: { padding: '6px 12px', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#9ca3af', borderBottom: '1px solid #e5e7eb' },
-  logBody: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 12px', background: '#0f172a', borderRadius: '0 0 6px 6px' },
-  logLine: { color: '#e2e8f0', fontSize: 12, lineHeight: '1.6', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
-  logEmpty: { color: '#475569', fontSize: 12 },
+  logViewer: { flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 18, background: '#eef2f7', overflow: 'hidden' },
+  logViewerEmpty: { alignItems: 'center', justifyContent: 'center', color: '#94a3b8' },
+  logViewerHeader: { flexShrink: 0, padding: '2px 2px 14px' },
+  logViewerTitleRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 },
+  logViewerEyebrow: { marginRight: 4, color: '#64748b', fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' },
+  logViewerTitle: { margin: 0, fontSize: 20, lineHeight: 1.3 },
+  logViewerPath: { marginTop: 3, color: '#94a3b8', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  logBody: { flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', background: '#0f172a', border: '1px solid #1e293b', borderRadius: 7, boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.2)' },
+  logText: { margin: 0, color: '#e2e8f0', fontFamily: 'monospace', fontSize: 12, lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
+  logEmpty: { color: '#64748b', fontSize: 12 },
 
-  addBar: { borderTop: '1px solid #e5e7eb', padding: '10px 28px' },
+  addBar: { borderTop: '1px solid #e5e7eb', padding: '12px 18px', background: '#fff' },
   form: { display: 'flex', gap: 8 },
-  input: { flex: 1, padding: '6px 10px', fontFamily: 'monospace', fontSize: 13, border: '1px solid #d1d5db', borderRadius: 4, outline: 'none' },
+  input: { flex: 1, minWidth: 0, padding: '8px 10px', fontFamily: 'monospace', fontSize: 12, border: '1px solid #cbd5e1', borderRadius: 5, outline: 'none' },
   errorText: { color: '#ef4444', margin: '6px 0 0', fontSize: 12 },
 }

@@ -16,6 +16,24 @@ select:disabled {
   opacity: 0.6;
 }
 
+.api-row:hover {
+  background: #f8fafc !important;
+}
+
+.api-row-selected:hover {
+  background: #f5f8ff !important;
+}
+
+.pane-resizer:hover span,
+.pane-resizer:active span {
+  width: 3px !important;
+  background: #6366f1 !important;
+}
+
+.env-modal {
+  scrollbar-color: #cbd5e1 transparent;
+}
+
 .spinner {
   display: inline-block;
   width: 10px;
@@ -28,4 +46,35 @@ select:disabled {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@media (max-width: 900px) {
+  .app-layout {
+    flex-direction: column !important;
+    overflow: auto !important;
+  }
+
+  .api-pane {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: 56vh;
+    flex: none !important;
+  }
+
+  .pane-resizer {
+    display: none !important;
+  }
+
+  .log-viewer {
+    min-height: 44vh !important;
+    flex: none !important;
+  }
+
+  .env-modal {
+    width: 94vw !important;
+    height: 88vh !important;
+    min-width: 0 !important;
+    resize: none !important;
+  }
 }

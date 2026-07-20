@@ -84,11 +84,22 @@ func (pm *ProcessManager) Start(id, repoPath, mavenPath, jdkPath, envID, envName
 	pm.procs[id] = &managedProcess{cmd: cmd, pid: cmd.Process.Pid, envID: envID, envName: envName}
 	pm.store.StorePid(id, ProcInfo{Pid: cmd.Process.Pid, EnvID: envID, EnvName: envName})
 
-	go pipeLines(stdout, session)
-	go pipeLines(stderr, session)
+	var pipeWG sync.WaitGroup
+	pipeWG.Add(2)
+	go func() {
+		defer pipeWG.Done()
+		pipeLines(stdout, session)
+	}()
+	go func() {
+		defer pipeWG.Done()
+		pipeLines(stderr, session)
+	}()
 
 	go func() {
 		cmd.Wait()
+		// Wait closes the stdout/stderr pipes as the process exits. Let both
+		// readers deliver their remaining bytes before closing the SSE session.
+		pipeWG.Wait()
 		pm.mu.Lock()
 		delete(pm.procs, id)
 		pm.mu.Unlock()
@@ -162,9 +173,20 @@ func (pm *ProcessManager) GetSession(id string) *LogSession {
 }
 
 func pipeLines(r io.Reader, s *LogSession) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		s.append(scanner.Text())
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			if line[len(line)-1] == '\n' {
+				line = line[:len(line)-1]
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+			}
+			s.append(line)
+		}
+		if err != nil {
+			return
+		}
 	}
 }

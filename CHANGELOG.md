@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.6] - 2026-07-20
+
+### Added
+
+- **Configurable manager port.** API Manager now listens on
+  `http://127.0.0.1:9000` by default. The port can be selected with
+  `--port <number>` or `API_MANAGER_PORT`, with the command-line flag taking
+  precedence. Explicit ports fail with a clear error when unavailable.
+- When the default port is occupied, API Manager automatically selects the
+  first available port from 9001 through 9010 and prints the exact URL used.
+- The Vite development proxy can target another backend through
+  `API_MANAGER_DEV_TARGET`.
+- Removing an API from the manager now requires confirmation and explains that
+  the repository files will not be deleted.
+
+### Changed
+
+- **Redesigned API and log workspace.** APIs are presented as larger,
+  information-rich rows with their status, environment, branch, port, path,
+  repository actions, and a dedicated far-right Logs button.
+- The API list occupies 40% of the window by default and can be resized with a
+  draggable divider. Logs use the remaining pane, and the layout stacks on
+  narrower screens.
+- The Environments dialog is larger and can be resized on desktop for easier
+  editing of environment-variable sets.
+- Startup now binds only to the local loopback interface instead of exposing the
+  unauthenticated manager on every network interface.
+
+### Fixed
+
+- **Live logs remain current after interruptions.** Every SSE log entry now has
+  a sequence ID, and reconnecting clients resume from their last received entry
+  without duplicating the retained history or missing subsequent output.
+- Log streams now send periodic keep-alive events, disable proxy buffering, and
+  stop cleanly when a client write fails.
+- API output lines larger than 1 MiB no longer terminate log capture. Final
+  partial lines and buffered stdout/stderr are flushed before a process session
+  closes.
+- The browser log buffer remains bounded while preserving the latest retained
+  output, preventing long-running sessions from growing memory indefinitely.
+
 ## [0.0.5] - 2026-06-19
 
 ### Fixed
@@ -113,7 +154,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform builds (macOS, Linux, Windows) via `build.sh` / `build.bat`.
 
 [#3]: https://github.com/theo-lev/local-api-launcher/issues/3
-[Unreleased]: https://github.com/theo-lev/local-api-launcher/compare/0.0.5...HEAD
+[Unreleased]: https://github.com/theo-lev/local-api-launcher/compare/0.0.6...HEAD
+[0.0.6]: https://github.com/theo-lev/local-api-launcher/compare/0.0.5...0.0.6
 [0.0.5]: https://github.com/theo-lev/local-api-launcher/compare/0.0.4...0.0.5
 [0.0.4]: https://github.com/theo-lev/local-api-launcher/compare/0.0.3...0.0.4
 [0.0.3]: https://github.com/theo-lev/local-api-launcher/compare/0.0.2...0.0.3

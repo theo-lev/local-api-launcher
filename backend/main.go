@@ -2,9 +2,12 @@ package main
 
 import (
 	"embed"
+	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -54,6 +57,23 @@ func spaHandler(assets fs.FS) http.Handler {
 }
 
 func main() {
+	options, err := parseStartupOptions(os.Args[1:], os.Getenv, os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		fatal("invalid startup options:", err)
+	}
+
+	listener, port, err := listenForStartup(options, net.Listen)
+	if err != nil {
+		fatal("failed to start API Manager:", err)
+	}
+	defer listener.Close()
+	if !options.explicit && port != defaultManagerPort {
+		log.Printf("Port %d is already in use; using %d instead.", defaultManagerPort, port)
+	}
+
 	store, err := NewStore(configPath())
 	if err != nil {
 		fatal("failed to load config:", err)
@@ -159,8 +179,9 @@ func main() {
 	}
 	mux.Handle("/", spaHandler(frontendFS))
 
-	log.Println("API Manager running at http://localhost:8080")
-	if err := http.ListenAndServe(":8080", corsMiddleware(mux)); err != nil {
-		fatal(err, "(is port 8080 already in use by another program?)")
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+	log.Printf("API Manager running at %s", url)
+	if err := http.Serve(listener, corsMiddleware(mux)); err != nil {
+		fatal("API Manager server stopped:", err)
 	}
 }
