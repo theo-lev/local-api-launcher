@@ -41,6 +41,7 @@ type EnvSet struct {
 // snapshot used for display when EnvID no longer resolves (e.g. set deleted).
 type ProcInfo struct {
 	Pid     int    `json:"pid"`
+	RunID   string `json:"runId,omitempty"`
 	EnvID   string `json:"envId,omitempty"`
 	EnvName string `json:"envName,omitempty"`
 }
@@ -189,6 +190,19 @@ func (s *Store) RemovePid(id string) error {
 	defer s.mu.Unlock()
 	delete(s.data.Pids, id)
 	return s.save()
+}
+
+// RemovePidIfRun prevents cleanup from an older launch from deleting a newer
+// launch's persisted PID. An empty run ID is accepted only for legacy records.
+func (s *Store) RemovePidIfRun(id, runID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.data.Pids[id]
+	if !ok || (info.RunID != "" && info.RunID != runID) {
+		return false, nil
+	}
+	delete(s.data.Pids, id)
+	return true, s.save()
 }
 
 func (s *Store) GetPids() map[string]ProcInfo {

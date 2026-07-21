@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os/exec"
 	"strconv"
 	"syscall"
@@ -21,18 +22,21 @@ func setProcAttr(cmd *exec.Cmd) {
 // killTree terminates pid and all of its descendants. mvn.cmd is a cmd.exe
 // wrapper that spawns java as a child, so killing only the wrapper leaves
 // the API running (issue #3); taskkill /T walks the whole tree.
-func killTree(pid int) {
+func killTree(pid int) error {
 	kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
 	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
-	kill.Run()
+	if output, err := kill.CombinedOutput(); err != nil {
+		return fmt.Errorf("taskkill pid %d: %w (%s)", pid, err, output)
+	}
+	return nil
 }
 
-func killProc(cmd *exec.Cmd) {
-	killTree(cmd.Process.Pid)
+func killProc(cmd *exec.Cmd) error {
+	return killTree(cmd.Process.Pid)
 }
 
-func killByPid(pid int) {
-	killTree(pid)
+func killByPid(pid int) error {
+	return killTree(pid)
 }
 
 func isAlive(pid int) bool {

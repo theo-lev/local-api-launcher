@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 
 const API = ''
 const MAX_LOG_LINES = 2000
+const EMPTY_LOGS = []
 
 function basename(path) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path
@@ -97,7 +98,7 @@ function SettingsPanel({ onClose, onManageEnvs }) {
   )
 }
 
-function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged, onLogReset }) {
+function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
   const [branches, setBranches] = useState([])
   const [fetching, setFetching] = useState(false)
   const [fetchError, setFetchError] = useState('')
@@ -119,10 +120,10 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged, onLogRese
   useEffect(() => { loadBranches() }, [loadBranches])
 
   const handleStartStop = async () => {
+    if (repo.status === 'stopping') return
     setProcessError('')
     const isRunning = repo.status === 'running'
     setBusy(isRunning ? 'stopping' : 'starting')
-    if (!isRunning) onLogReset(repo.id)
     const res = await fetch(`${API}/api/repos/${repo.id}/${isRunning ? 'stop' : 'start'}`, { method: 'POST' })
     if (!res.ok) setProcessError(await res.text())
     else await onReposChanged()
@@ -225,11 +226,12 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged, onLogRese
             <button
               style={{ ...s.rowBtn, ...(repo.status === 'running' ? s.btnStop : s.btnStart) }}
               onClick={handleStartStop}
-              disabled={busy !== ''}
+              disabled={busy !== '' || repo.status === 'stopping'}
             >
               {busy === 'starting' ? <>Starting <Spinner light /></>
                 : busy === 'stopping' ? <>Stopping <Spinner light /></>
-                : repo.status === 'running' ? 'Stop' : 'Start'}
+                : repo.status === 'running' ? 'Stop'
+                : repo.status === 'stopping' ? <>Stopping <Spinner light /></> : 'Start'}
             </button>
           </div>
 
@@ -272,7 +274,7 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged, onLogRese
   )
 }
 
-function ApiPane({ repos, selectedId, onSelect, onRemove, onReposChanged, onLogReset, environments, activeEnvId, onSwitchEnv, onManageEnvs, path, onPathChange, onAddRepo, addError }) {
+function ApiPane({ repos, selectedId, onSelect, onRemove, onReposChanged, environments, activeEnvId, onSwitchEnv, onManageEnvs, path, onPathChange, onAddRepo, addError }) {
   const [showSettings, setShowSettings] = useState(false)
 
   return (
@@ -303,7 +305,6 @@ function ApiPane({ repos, selectedId, onSelect, onRemove, onReposChanged, onLogR
             onSelect={onSelect}
             onRemove={onRemove}
             onReposChanged={onReposChanged}
-            onLogReset={onLogReset}
           />
         ))}
       </ul>
@@ -324,27 +325,59 @@ function ApiPane({ repos, selectedId, onSelect, onRemove, onReposChanged, onLogR
   )
 }
 
-function LogViewer({ repo }) {
-  const [logs, setLogs] = useState([])
+function LogViewer({ repo, logSession, onSessionChange }) {
   const logBodyRef = useRef(null)
   const esRef = useRef(null)
   const pendingRef = useRef([])
-  const lastEventIdRef = useRef('')
+  const runIdRef = useRef(logSession?.runId || '')
+  const lastEventIdRef = useRef(logSession?.cursor || '')
+  const endedRef = useRef(logSession?.ended || false)
+  const retryRef = useRef(false)
   const repoId = repo?.id
   const repoStatus = repo?.status
   const reconnected = repo?.reconnected
+  const logs = logSession?.lines || EMPTY_LOGS
+
+  const updateSession = useCallback(updater => {
+    if (repoId) onSessionChange(repoId, updater)
+  }, [repoId, onSessionChange])
+
+  const flushPending = useCallback(() => {
+    if (pendingRef.current.length === 0) return
+    const entries = pendingRef.current.splice(0)
+    const runId = entries[entries.length - 1].runId
+    const cursor = entries[entries.length - 1].cursor
+    const lines = entries.map(entry => entry.line)
+    updateSession(prev => {
+      const previous = prev?.runId === runId ? prev : { runId, cursor: '', lines: [], ended: false, gap: false }
+      return { ...previous, runId, cursor, ended: false, lines: [...previous.lines, ...lines].slice(-MAX_LOG_LINES) }
+    })
+  }, [updateSession])
+
+  const clearDisplayedLogs = useCallback(() => {
+    // Drop lines already received but not yet rendered as well. Persist the
+    // latest cursor so changing views or reconnecting does not replay them.
+    pendingRef.current = []
+    updateSession(prev => ({
+      ...prev,
+      runId: runIdRef.current || prev.runId,
+      cursor: lastEventIdRef.current || prev.cursor,
+      lines: [],
+      gap: false,
+    }))
+  }, [updateSession])
 
   useEffect(() => {
-    const id = setInterval(() => {
-      if (pendingRef.current.length === 0) return
-      const lines = pendingRef.current.splice(0)
-      setLogs(prev => {
-        const next = [...prev, ...lines]
-        return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next
-      })
-    }, 100)
-    return () => clearInterval(id)
-  }, [])
+    retryRef.current = repoStatus === 'running' || repoStatus === 'stopping'
+  }, [repoStatus])
+
+  useEffect(() => {
+    const id = setInterval(flushPending, 100)
+    return () => {
+      clearInterval(id)
+      flushPending()
+    }
+  }, [flushPending])
 
   useEffect(() => {
     const el = logBodyRef.current
@@ -352,7 +385,7 @@ function LogViewer({ repo }) {
   }, [logs])
 
   useEffect(() => {
-    if (!repoId || repoStatus !== 'running' || reconnected) {
+    if (!repoId || reconnected) {
       esRef.current?.close()
       esRef.current = null
       return
@@ -363,19 +396,51 @@ function LogViewer({ repo }) {
     let retryTimer
 
     function connect() {
+      endedRef.current = false
       const cursor = lastEventIdRef.current
       const suffix = cursor ? `?after=${encodeURIComponent(cursor)}` : ''
       es = new EventSource(`${API}/api/repos/${repoId}/logs${suffix}`)
       esRef.current = es
       es.onmessage = e => {
+        let entry
+        try { entry = JSON.parse(e.data) } catch { return }
+        if (!entry.runId || typeof entry.line !== 'string') return
+        if (entry.runId !== runIdRef.current) {
+          pendingRef.current = []
+          runIdRef.current = entry.runId
+          endedRef.current = false
+          updateSession(() => ({ runId: entry.runId, cursor: '', lines: [], ended: false, gap: false }))
+        }
         if (e.lastEventId) lastEventIdRef.current = e.lastEventId
         const pending = pendingRef.current
-        pending.push(e.data)
-        if (pending.length > MAX_LOG_LINES * 2) pending.splice(0, pending.length - MAX_LOG_LINES)
+        pending.push({ runId: entry.runId, cursor: e.lastEventId, line: entry.line })
+        if (pending.length > MAX_LOG_LINES) {
+          pending.splice(0, pending.length - MAX_LOG_LINES)
+          updateSession(prev => ({ ...prev, runId: entry.runId, lines: [], gap: true }))
+        }
       }
+      const reset = e => {
+        let detail
+        try { detail = JSON.parse(e.data) } catch { return }
+        pendingRef.current = []
+        runIdRef.current = detail.runId || ''
+        lastEventIdRef.current = ''
+        endedRef.current = false
+        updateSession(() => ({ runId: detail.runId || '', cursor: '', lines: [], ended: false, gap: e.type === 'retention-gap' }))
+      }
+      es.addEventListener('session-reset', reset)
+      es.addEventListener('retention-gap', reset)
+      es.addEventListener('session-end', e => {
+        let detail = {}
+        try { detail = JSON.parse(e.data) } catch { /* keep the current run */ }
+        flushPending()
+        endedRef.current = true
+        updateSession(prev => ({ ...prev, runId: detail.runId || prev.runId, ended: true }))
+        es.close()
+      })
       es.onerror = () => {
         es.close()
-        if (active) retryTimer = setTimeout(connect, 2000)
+        if (active && !endedRef.current && retryRef.current) retryTimer = setTimeout(connect, 2000)
       }
     }
     connect()
@@ -385,8 +450,9 @@ function LogViewer({ repo }) {
       clearTimeout(retryTimer)
       es?.close()
       esRef.current = null
+      flushPending()
     }
-  }, [repoId, repoStatus, reconnected])
+  }, [repoId, repoStatus, reconnected, flushPending, updateSession])
 
   if (!repo) {
     return <main className="log-viewer" style={{ ...s.logViewer, ...s.logViewerEmpty }}>Select an API to display its logs.</main>
@@ -394,7 +460,7 @@ function LogViewer({ repo }) {
 
   const emptyMessage = reconnected
     ? 'Logs are unavailable for a process reconnected after API Manager restarted.'
-    : repo.status === 'running' ? 'Waiting for output…' : 'Start this API to see live logs.'
+    : repo.status === 'running' ? 'Waiting for output…' : 'No retained logs for this API.'
 
   return (
     <main className="log-viewer" style={s.logViewer}>
@@ -403,10 +469,17 @@ function LogViewer({ repo }) {
           <span style={s.logViewerEyebrow}>Logs</span>
           <StatusDot status={repo.status} />
           <span style={s.statusLabel}>{repo.status}</span>
+          <button
+            type="button"
+            style={s.clearLogsBtn}
+            onClick={clearDisplayedLogs}
+            title="Clear displayed logs (backend history is preserved)"
+          >Clear console</button>
         </div>
         <h2 style={s.logViewerTitle}>{basename(repo.path)}</h2>
         <div style={s.logViewerPath}>{repo.path}</div>
       </header>
+      {logSession?.gap && <div style={s.logNotice}>Earlier output is no longer retained; showing the latest {MAX_LOG_LINES} lines.</div>}
       <div ref={logBodyRef} style={s.logBody}>
         {logs.length === 0
           ? <span style={s.logEmpty}>{emptyMessage}</span>
@@ -565,7 +638,7 @@ export default function App() {
   const [activeEnvId, setActiveEnvId] = useState('')
   const [showEnvModal, setShowEnvModal] = useState(false)
   const [paneWidth, setPaneWidth] = useState(null)
-  const [logVersions, setLogVersions] = useState({})
+  const [logSessions, setLogSessions] = useState({})
   const layoutRef = useRef(null)
 
   const fetchRepos = useCallback(() =>
@@ -645,14 +718,22 @@ export default function App() {
     document.body.style.userSelect = 'none'
   }
 
-  const resetLogs = id => {
-    setLogVersions(prev => ({ ...prev, [id]: (prev[id] || 0) + 1 }))
-  }
+  const updateLogSession = useCallback((id, updater) => {
+    setLogSessions(all => ({
+      ...all,
+      [id]: updater(all[id] || { runId: '', cursor: '', lines: [], ended: false, gap: false }),
+    }))
+  }, [])
 
   const removeRepo = async id => {
     await fetch(`${API}/api/repos/${id}`, { method: 'DELETE' })
     setRepos(prev => prev.filter(r => r.id !== id))
     setSelected(prev => prev?.id === id ? null : prev)
+    setLogSessions(prev => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
   }
 
   return (
@@ -667,7 +748,6 @@ export default function App() {
         onSelect={setSelected}
         onRemove={removeRepo}
         onReposChanged={fetchRepos}
-        onLogReset={resetLogs}
         environments={environments}
         activeEnvId={activeEnvId}
         onSwitchEnv={switchEnv}
@@ -691,8 +771,10 @@ export default function App() {
         />
       )}
       <LogViewer
-        key={`${selected?.id ?? 'none'}:${selected ? (logVersions[selected.id] || 0) : 0}`}
+        key={selected?.id ?? 'none'}
         repo={selected}
+        logSession={selected ? logSessions[selected.id] : null}
+        onSessionChange={updateLogSession}
       />
     </div>
   )
@@ -776,6 +858,8 @@ const s = {
   logBody: { flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', background: '#0f172a', border: '1px solid #1e293b', borderRadius: 7, boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.2)' },
   logText: { margin: 0, color: '#e2e8f0', fontFamily: 'monospace', fontSize: 12, lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
   logEmpty: { color: '#64748b', fontSize: 12 },
+  clearLogsBtn: { marginLeft: 'auto', padding: '5px 9px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 11, color: '#475569', background: '#fff', border: '1px solid #cbd5e1', borderRadius: 5 },
+  logNotice: { flexShrink: 0, marginBottom: 8, padding: '7px 10px', color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 5, fontSize: 11 },
 
   addBar: { borderTop: '1px solid #e5e7eb', padding: '12px 18px', background: '#fff' },
   form: { display: 'flex', gap: 8 },

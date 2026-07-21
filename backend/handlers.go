@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +24,7 @@ type RepoInfo struct {
 	PathError     bool   `json:"pathError,omitempty"`
 	Reconnected   bool   `json:"reconnected,omitempty"`
 	EnvName       string `json:"envName,omitempty"`
+	RunID         string `json:"runId,omitempty"`
 }
 
 type repoHandlers struct {
@@ -36,11 +40,7 @@ func newID() string {
 
 func (h *repoHandlers) enrich(r Repo) RepoInfo {
 	info := RepoInfo{ID: r.ID, Path: r.Path, Status: "stopped"}
-	if h.manager.IsRunning(r.ID) {
-		info.Status = "running"
-		info.Reconnected = h.manager.IsReconnected(r.ID)
-		_, info.EnvName = h.manager.RunningEnv(r.ID)
-	}
+	info.Status, info.RunID, _, info.EnvName, info.Reconnected = h.manager.Status(r.ID)
 	if _, err := os.Stat(r.Path); os.IsNotExist(err) {
 		info.PathError = true
 		return info
@@ -254,22 +254,48 @@ func (h *repoHandlers) logs(w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// EventSource sends Last-Event-ID on its own reconnects. The query cursor is
-	// also accepted because the UI creates a fresh EventSource after an error.
-	afterID := uint64(0)
+	// EventSource sends Last-Event-ID on native reconnects. The UI uses one
+	// explicit reconnect strategy and supplies the same run-scoped cursor here.
+	afterID, cursorRunID, hasCursor := uint64(0), "", false
 	cursor := r.URL.Query().Get("after")
 	if cursor == "" {
 		cursor = r.Header.Get("Last-Event-ID")
 	}
 	if cursor != "" {
-		afterID, _ = strconv.ParseUint(cursor, 10, 64)
+		hasCursor = true
+		parts := strings.SplitN(cursor, ":", 2)
+		if len(parts) == 2 {
+			cursorRunID = parts[0]
+			var err error
+			afterID, err = strconv.ParseUint(parts[1], 10, 64)
+			if err != nil {
+				cursorRunID = "" // malformed cursors explicitly reset
+			}
+		}
 	}
 
-	snapshot, client := session.subscribe(afterID)
-	defer session.unsubscribe(client)
+	sub := session.subscribe(cursorRunID, afterID, hasCursor)
+	defer session.unsubscribe(sub.client)
+	log.Printf("log stream opened repo=%s run=%s cursor=%q retained=%d-%d", id, session.runID, cursor, sub.firstID, sub.lastID)
+	defer log.Printf("log stream closed repo=%s run=%s", id, session.runID)
 
-	for _, entry := range snapshot {
-		if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", entry.id, entry.line); err != nil {
+	if sub.reset {
+		if err := writeSSEEvent(w, "session-reset", "", map[string]any{
+			"runId": session.runID, "firstSequence": sub.firstID, "lastSequence": sub.lastID,
+		}); err != nil {
+			return
+		}
+	}
+	if sub.gap {
+		if err := writeSSEEvent(w, "retention-gap", "", map[string]any{
+			"runId": session.runID, "firstSequence": sub.firstID, "lastSequence": sub.lastID,
+		}); err != nil {
+			return
+		}
+	}
+
+	for _, entry := range sub.snapshot {
+		if err := writeLogEntry(w, session.runID, entry); err != nil {
 			return
 		}
 	}
@@ -280,16 +306,32 @@ func (h *repoHandlers) logs(w http.ResponseWriter, r *http.Request, id string) {
 
 	for {
 		select {
-		case <-client.wake:
-			entries, closed := client.take()
+		case <-sub.client.wake:
+			entries, closed, gap := sub.client.take()
+			if gap {
+				first, last := uint64(0), uint64(0)
+				if len(entries) != 0 {
+					first, last = entries[0].id, entries[len(entries)-1].id
+				}
+				if err := writeSSEEvent(w, "retention-gap", "", map[string]any{
+					"runId": session.runID, "firstSequence": first, "lastSequence": last,
+				}); err != nil {
+					return
+				}
+			}
 			for _, entry := range entries {
-				if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", entry.id, entry.line); err != nil {
+				if err := writeLogEntry(w, session.runID, entry); err != nil {
+					return
+				}
+			}
+			if closed {
+				if err := writeSSEEvent(w, "session-end", "", map[string]any{"runId": session.runID}); err != nil {
 					return
 				}
 			}
 			flusher.Flush()
 			if closed {
-				return // session ended (process stopped); buffered lines flushed
+				return
 			}
 		case <-heartbeat.C:
 			if _, err := fmt.Fprint(w, ": keep-alive\n\n"); err != nil {
@@ -300,4 +342,32 @@ func (h *repoHandlers) logs(w http.ResponseWriter, r *http.Request, id string) {
 			return // client disconnected
 		}
 	}
+}
+
+func writeLogEntry(w io.Writer, runID string, entry logEntry) error {
+	return writeSSEEvent(w, "", entry.cursor(runID), map[string]any{
+		"runId": runID, "sequence": entry.id, "line": entry.line,
+	})
+}
+
+// JSON keeps carriage returns, embedded newlines, and other unusual output
+// escaped inside one SSE data line. It also gives the frontend the run ID on
+// every entry instead of relying only on connection-level state.
+func writeSSEEvent(w io.Writer, event, id string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if event != "" {
+		if _, err = fmt.Fprintf(w, "event: %s\n", event); err != nil {
+			return err
+		}
+	}
+	if id != "" {
+		if _, err = fmt.Fprintf(w, "id: %s\n", id); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", data)
+	return err
 }

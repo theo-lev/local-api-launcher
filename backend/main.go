@@ -82,7 +82,7 @@ func main() {
 	manager := NewProcessManager(store)
 	for id, info := range store.GetPids() {
 		if isAlive(info.Pid) {
-			manager.Reconnect(id, info.Pid, info.EnvID, info.EnvName)
+			manager.Reconnect(id, info.Pid, info.EnvID, info.EnvName, info.RunID)
 		} else {
 			store.RemovePid(id)
 		}

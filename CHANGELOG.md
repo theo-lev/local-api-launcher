@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.7] - 2026-07-21
+
+### Added
+
+- The log panel now has a **Clear console** button. It clears only the local
+  display and pending UI batch while preserving the backend's retained logs;
+  cleared entries stay hidden after reconnecting or switching views.
+- Process and log-session diagnostics now include repository IDs, run IDs,
+  PIDs, retained sequence ranges, subscriber activity, and cleanup decisions.
+
+### Changed
+
+- Every process launch and log session now has a unique run ID. SSE cursors are
+  scoped to that launch (`runID:sequence`), and the repository API exposes the
+  current run ID and `stopping` state.
+- The latest completed log session remains available until the next successful
+  launch replaces it. The frontend retains logs and cursors per repository, so
+  switching between APIs restores both running and completed output.
+- SSE log payloads are JSON encoded, safely preserving carriage returns,
+  embedded newlines, and other unusual output.
+
+### Fixed
+
+- **Rapid Stop → Start can no longer detach a live API.** Stopped processes
+  remain registered as `stopping` until termination and pipe draining finish,
+  restarts are rejected during that period, and an old process waiter cannot
+  remove a newer launch's process or persisted PID state.
+- Windows `taskkill` and Unix process-group termination errors are now returned
+  instead of silently reporting a successful stop and clearing tracked state.
+- Reconnecting with a cursor from another launch explicitly resets the viewer
+  and replays the current retained snapshot. Falling behind the 2,000-line
+  retention window similarly emits an explicit retention-gap event.
+- Final partial lines, long lines, stdout, and stderr are drained before a log
+  session closes without `Wait` prematurely closing their read pipes.
+- Windows-1252 process output is normalized before JSON encoding while valid
+  UTF-8 remains unchanged, preventing accented text such as `Tâche` and
+  `lancée` from appearing with replacement characters.
+
 ## [0.0.6] - 2026-07-20
 
 ### Added

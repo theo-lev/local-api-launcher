@@ -1,6 +1,10 @@
 package main
 
-import "sync"
+import (
+	"fmt"
+	"log"
+	"sync"
+)
 
 const maxLogLines = 2000
 
@@ -9,27 +13,45 @@ type logEntry struct {
 	line string
 }
 
+func (e logEntry) cursor(runID string) string {
+	return fmt.Sprintf("%s:%d", runID, e.id)
+}
+
 type LogSession struct {
 	mu      sync.Mutex
+	runID   string
 	lines   []logEntry
 	clients map[*logClient]struct{}
 	closed  bool
 	nextID  uint64
 }
 
-// logClient is one subscriber's outbound queue. Lines are appended without
-// blocking the producer and drained in batches by the SSE handler, so a slow
-// reader can never stall the log pipeline (and through it, the child process)
-// nor silently drop lines the way a small fixed-size channel did.
+// logClient is one subscriber's bounded outbound queue. If it overflows, gap
+// is set so the handler can explicitly tell the browser that older entries
+// were discarded rather than presenting a silently discontinuous stream.
 type logClient struct {
 	mu     sync.Mutex
 	buf    []logEntry
 	closed bool
-	wake   chan struct{} // cap 1; signals "lines buffered or session closed"
+	gap    bool
+	wake   chan struct{}
 }
 
-func newLogSession() *LogSession {
-	return &LogSession{clients: make(map[*logClient]struct{})}
+type logSubscription struct {
+	snapshot []logEntry
+	client   *logClient
+	firstID  uint64
+	lastID   uint64
+	reset    bool
+	gap      bool
+}
+
+func newLogSession(runIDs ...string) *LogSession {
+	runID := ""
+	if len(runIDs) != 0 {
+		runID = runIDs[0]
+	}
+	return &LogSession{runID: runID, clients: make(map[*logClient]struct{})}
 }
 
 func (s *LogSession) append(line string) {
@@ -46,15 +68,12 @@ func (s *LogSession) append(line string) {
 	}
 }
 
-// push appends a line to the client's queue and wakes its reader. It never
-// blocks. The queue is bounded by maxLogLines (matching the session's own
-// retention): a reader that falls that far behind drops its oldest lines,
-// which is no worse than what a fresh reconnect would have replayed anyway.
 func (c *logClient) push(entry logEntry) {
 	c.mu.Lock()
 	c.buf = append(c.buf, entry)
 	if len(c.buf) > maxLogLines {
 		c.buf = c.buf[len(c.buf)-maxLogLines:]
+		c.gap = true
 	}
 	c.mu.Unlock()
 	c.signal()
@@ -67,22 +86,34 @@ func (c *logClient) signal() {
 	}
 }
 
-// take drains all buffered lines and reports whether the session has closed.
-func (c *logClient) take() (lines []logEntry, closed bool) {
+func (c *logClient) take() (lines []logEntry, closed, gap bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	lines, c.buf = c.buf, nil
-	return lines, c.closed
+	gap, c.gap = c.gap, false
+	return lines, c.closed, gap
 }
 
-// subscribe returns buffered entries newer than afterID and a live client for
-// future entries. The snapshot and registration happen atomically under the
-// lock, so no entry can slip between the two (no gaps, no duplicates). A zero
-// cursor is the initial connection and receives the complete retained history.
-func (s *LogSession) subscribe(afterID uint64) ([]logEntry, *logClient) {
+// subscribe atomically takes a retained snapshot and registers for new lines.
+// A cursor from another run resets to the full snapshot. A cursor older than
+// the retained range reports a gap and likewise returns the full snapshot.
+func (s *LogSession) subscribe(cursorRunID string, afterID uint64, hasCursor bool) logSubscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := &logClient{wake: make(chan struct{}, 1)}
+
+	result := logSubscription{client: &logClient{wake: make(chan struct{}, 1)}}
+	if len(s.lines) != 0 {
+		result.firstID = s.lines[0].id
+		result.lastID = s.lines[len(s.lines)-1].id
+	}
+	if hasCursor && (cursorRunID != s.runID || afterID > s.nextID) {
+		result.reset = true
+		afterID = 0
+	} else if hasCursor && result.firstID > 0 && afterID < result.firstID-1 {
+		result.gap = true
+		afterID = 0
+	}
+
 	first := len(s.lines)
 	for i, entry := range s.lines {
 		if entry.id > afterID {
@@ -90,25 +121,29 @@ func (s *LogSession) subscribe(afterID uint64) ([]logEntry, *logClient) {
 			break
 		}
 	}
-	snap := make([]logEntry, len(s.lines)-first)
-	copy(snap, s.lines[first:])
+	result.snapshot = append([]logEntry(nil), s.lines[first:]...)
 	if s.closed {
-		c.closed = true
-		c.signal() // let the handler flush the snapshot, then exit
+		result.client.closed = true
+		result.client.signal()
 	} else {
-		s.clients[c] = struct{}{}
+		s.clients[result.client] = struct{}{}
 	}
-	return snap, c
+	log.Printf("log subscriber connected run=%s retained=%d-%d cursor=%s:%d reset=%t gap=%t closed=%t",
+		s.runID, result.firstID, result.lastID, cursorRunID, afterID, result.reset, result.gap, s.closed)
+	return result
 }
 
 func (s *LogSession) unsubscribe(c *logClient) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.clients, c)
+	first, last := uint64(0), uint64(0)
+	if len(s.lines) != 0 {
+		first, last = s.lines[0].id, s.lines[len(s.lines)-1].id
+	}
+	s.mu.Unlock()
+	log.Printf("log subscriber disconnected run=%s retained=%d-%d", s.runID, first, last)
 }
 
-// closeAll signals all connected clients that the session has ended, leaving
-// any still-buffered lines for the handler to flush before it returns.
 func (s *LogSession) closeAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -120,4 +155,9 @@ func (s *LogSession) closeAll() {
 		c.signal()
 		delete(s.clients, c)
 	}
+	first, last := uint64(0), uint64(0)
+	if len(s.lines) != 0 {
+		first, last = s.lines[0].id, s.lines[len(s.lines)-1].id
+	}
+	log.Printf("log session completed run=%s retained=%d-%d", s.runID, first, last)
 }
