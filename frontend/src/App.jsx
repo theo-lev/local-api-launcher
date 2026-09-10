@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
+import BranchPicker from './BranchPicker'
 
 const API = ''
 const MAX_LOG_LINES = 2000
 const EMPTY_LOGS = []
+const UPDATE_CHECK_INTERVAL = 5 * 60 * 1000
 
 function basename(path) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path
@@ -98,6 +101,40 @@ function SettingsPanel({ onClose, onManageEnvs }) {
   )
 }
 
+function CheckoutDialog({ error, switching, onClose, onConfirm }) {
+  const dialog = useRef(null)
+  useEffect(() => {
+    const element = dialog.current
+    element.showModal()
+    return () => element.close()
+  }, [])
+
+  return createPortal(
+    <dialog ref={dialog} aria-labelledby="checkout-title" style={{ ...s.checkoutDialog, fontFamily: s.layout.fontFamily, fontSize: s.layout.fontSize }}
+      onClick={e => e.stopPropagation()}
+      onCancel={e => { e.preventDefault(); if (!switching) onClose() }}>
+      <h2 id="checkout-title" style={s.dirtyTitle}>
+        {error.error === 'dirty' ? 'Modifications non commitées' : 'Changement impossible'}
+      </h2>
+      <p>Switch sur <strong>{error.branch}</strong></p>
+      {error.error !== 'dirty' && <p role="alert" style={s.rowError}>{error.error}</p>}
+      {error.files?.length > 0 && (
+        <ul style={{ ...s.dirtyList, maxHeight: '35vh', overflow: 'auto', overflowWrap: 'anywhere' }}>
+          {error.files.map(f => <li key={f}>{f}</li>)}
+        </ul>
+      )}
+      {error.error === 'dirty' && <p>Sauvegarder dans ce stash, puis changer de branche ?<br />
+        <strong style={{ overflowWrap: 'anywhere' }}>{error.stashMessage}</strong></p>}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <button autoFocus style={s.rowBtn} disabled={switching} onClick={onClose}>{error.error === 'dirty' ? 'Annuler' : 'Fermer'}</button>
+        {error.error === 'dirty' && <button style={s.btn} disabled={switching} onClick={onConfirm}>
+          {switching ? <>Changement en cours <Spinner /></> : 'Stash et switch'}
+        </button>}
+      </div>
+    </dialog>, document.body,
+  )
+}
+
 function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
   const [branches, setBranches] = useState([])
   const [fetching, setFetching] = useState(false)
@@ -108,6 +145,44 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
   const [checkoutError, setCheckoutError] = useState(null)
   const [busy, setBusy] = useState('') // 'starting' | 'stopping' | ''
   const [processError, setProcessError] = useState('')
+  const [updates, setUpdates] = useState(null)
+  const [updateError, setUpdateError] = useState('')
+  const [openingIdea, setOpeningIdea] = useState(false)
+  const [ideaError, setIdeaError] = useState('')
+  const [updateRevision, setUpdateRevision] = useState(0)
+
+  useEffect(() => {
+    if (repo.pathError) return
+    let active = true
+    let checking = false
+    const controller = new AbortController()
+    const check = async () => {
+      if (checking) return
+      checking = true
+      try {
+        const res = await fetch(`${API}/api/repos/${repo.id}/updates`, { method: 'POST', signal: controller.signal })
+        if (!res.ok) throw new Error(await res.text())
+        const status = await res.json()
+        if (active) { setUpdates(status); setUpdateError('') }
+      } catch (error) {
+        if (active) { setUpdates(null); setUpdateError(`Update check failed: ${error.message}`) }
+      } finally { checking = false }
+    }
+    check()
+    const timer = setInterval(check, UPDATE_CHECK_INTERVAL)
+    return () => { active = false; controller.abort(); clearInterval(timer) }
+  }, [repo.id, repo.pathError, repo.currentBranch, updateRevision])
+
+  const handleOpenIdea = async e => {
+    e.stopPropagation()
+    setOpeningIdea(true)
+    setIdeaError('')
+    try {
+      const res = await fetch(`${API}/api/repos/${repo.id}/idea`, { method: 'POST' })
+      if (!res.ok) throw new Error(await res.text())
+    } catch (error) { setIdeaError(error.message) }
+    finally { setOpeningIdea(false) }
+  }
 
   const loadBranches = useCallback(() => {
     if (repo.pathError) return Promise.resolve()
@@ -134,7 +209,7 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
     setPulling(true)
     setPullError(null)
     const res = await fetch(`${API}/api/repos/${repo.id}/pull`, { method: 'POST' })
-    if (res.ok) await onReposChanged()
+    if (res.ok) { await onReposChanged(); setUpdates(null); setUpdateRevision(v => v + 1) }
     else if (res.status === 409) setPullError(await res.json())
     else setPullError({ error: await res.text(), files: [] })
     setPulling(false)
@@ -145,23 +220,31 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
     setFetchError('')
     const res = await fetch(`${API}/api/repos/${repo.id}/fetch`, { method: 'POST' })
     if (!res.ok) setFetchError(await res.text())
-    else await loadBranches()
+    else { await loadBranches(); setUpdateRevision(v => v + 1) }
     setFetching(false)
   }
 
-  const handleCheckout = async branch => {
-    if (branch === repo.currentBranch) return
+  const handleCheckout = async (branch, stash = false) => {
+    if (switching || branch === repo.currentBranch) return
     setSwitching(true)
-    setCheckoutError(null)
-    const res = await fetch(`${API}/api/repos/${repo.id}/checkout`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ branch }),
-    })
-    if (res.ok) await onReposChanged()
-    else if (res.status === 409) setCheckoutError(await res.json())
-    else setCheckoutError({ error: await res.text(), files: [] })
-    setSwitching(false)
+    try {
+      const res = await fetch(`${API}/api/repos/${repo.id}/checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch, stash, stashMessage: stash ? checkoutError?.stashMessage : undefined }),
+      })
+      if (res.ok) {
+        setCheckoutError(null)
+        await onReposChanged()
+      } else if (res.status === 409) setCheckoutError({ ...await res.json(), branch,
+        stashMessage: `API Manager: ${repo.currentBranch || 'HEAD détachée'} → ${branch} (${new Date().toISOString()})`,
+      })
+      else setCheckoutError({ error: await res.text(), files: [], branch })
+    } catch (error) {
+      setCheckoutError({ error: `Changement non confirmé : ${error.message}. Actualisez avant de réessayer.`, files: [], branch })
+    } finally {
+      setSwitching(false)
+    }
   }
 
   return (
@@ -177,6 +260,16 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
         {repo.status === 'running' && repo.envName && <span style={s.envBadge}>{repo.envName}</span>}
         {repo.reconnected && <span style={s.reconnectedBadge}>reconnected</span>}
         {repo.port > 0 && <span style={s.portBadge}>:{repo.port}</span>}
+        {!repo.pathError && updates?.branch === repo.currentBranch && updates.behind > 0 && (
+          <span style={{ display: 'inline-flex', color: '#3b82f6', flexShrink: 0 }}
+            role="img" aria-label={`${updates.behind} incoming commits. Update available.`}
+            title={`${updates.behind} incoming commit${updates.behind === 1 ? '' : 's'} from ${updates.upstream.replace(/^refs\/remotes\//, '')}. Click Update to pull.`}>
+            <svg width="16" height="18" viewBox="0 0 16 18" fill="none" aria-hidden="true">
+              <path d="M8 2v13m-5-5 5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+        )}
+        {!repo.pathError && updateError && <span title={updateError} aria-label={updateError} style={{ color: '#94a3b8' }}>?</span>}
         <span style={s.apiRowSpacer} />
         <button
           style={s.removeBtn}
@@ -190,6 +283,7 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
           title={`Remove ${basename(repo.path)}`}
           aria-label={`Remove ${basename(repo.path)}`}
         >✕</button>
+        <div style={{ position: 'relative', flexShrink: 0 }}>
         <button
           style={{ ...s.logsBtn, ...(selected ? s.logsBtnActive : {}) }}
           onClick={e => { e.stopPropagation(); onSelect(repo) }}
@@ -197,25 +291,26 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
         >
           {selected ? 'Viewing logs' : 'Logs →'}
         </button>
+        <button style={{ ...s.logsBtn, position: 'absolute', top: 'calc(100% + 5px)', right: 0, padding: '3px 9px' }} onClick={handleOpenIdea} disabled={openingIdea || repo.pathError}
+          title="Open repository in IntelliJ IDEA" aria-label={`Open ${basename(repo.path)} in IntelliJ IDEA`}>
+          {openingIdea ? <Spinner /> : 'IntelliJ'}
+        </button>
+        </div>
       </div>
       <div style={s.apiPath} title={repo.path}>{repo.path}</div>
+      {ideaError && <p role="alert" style={s.rowError}>{ideaError}</p>}
 
       {repo.pathError ? (
         <p style={s.rowError}>Path no longer exists on disk.</p>
       ) : (
         <>
           <div style={s.rowControls} onClick={e => e.stopPropagation()}>
-            <select
-              style={s.rowSelect}
-              value={repo.currentBranch || ''}
-              onChange={e => handleCheckout(e.target.value)}
+            <BranchPicker
+              branches={branches}
+              currentBranch={repo.currentBranch}
+              onChange={handleCheckout}
               disabled={switching}
-            >
-              {repo.currentBranch && !branches.includes(repo.currentBranch) && (
-                <option value={repo.currentBranch}>{repo.currentBranch}</option>
-              )}
-              {branches.map(b => <option key={b} value={b}>{b}</option>)}
-            </select>
+            />
             {switching && <Spinner />}
             <button style={s.rowBtn} onClick={handleFetch} disabled={fetching}>
               {fetching ? <>Fetching <Spinner light={false} /></> : 'Fetch'}
@@ -254,18 +349,9 @@ function RepoRow({ repo, selected, onSelect, onRemove, onReposChanged }) {
           )}
 
           {checkoutError && (
-            <div style={s.rowDirtyBox}>
-              <p style={s.dirtyTitle}>
-                {checkoutError.error === 'dirty'
-                  ? 'Cannot switch branch — uncommitted changes:'
-                  : checkoutError.error}
-              </p>
-              {checkoutError.files?.length > 0 && (
-                <ul style={s.dirtyList}>
-                  {checkoutError.files.map(f => <li key={f}>{f}</li>)}
-                </ul>
-              )}
-            </div>
+            <CheckoutDialog error={checkoutError} switching={switching}
+              onClose={() => setCheckoutError(null)}
+              onConfirm={() => handleCheckout(checkoutError.branch, true)} />
           )}
 
         </>
@@ -807,6 +893,7 @@ const s = {
   envManageBtn: { background: '#fff', border: '1px solid #cbd5e1', borderRadius: 5, cursor: 'pointer', color: '#475569', fontFamily: 'monospace', fontSize: 11, padding: '6px 9px', lineHeight: 1 },
   envBadge: { fontSize: 10, color: '#4338ca', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 999, padding: '2px 7px' },
 
+  checkoutDialog: { width: 'min(520px, calc(100vw - 48px))', maxHeight: '85vh', overflow: 'auto', padding: 24, border: '1px solid #e5e7eb', borderRadius: 10, boxShadow: '0 18px 55px rgba(15,23,42,0.3)', fontSize: 14, color: '#374151' },
   modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 20 },
   modal: { width: '75vw', height: '80vh', minWidth: 'min(720px, 92vw)', minHeight: 'min(480px, 85vh)', maxWidth: '95vw', maxHeight: '92vh', resize: 'both', background: '#fff', borderRadius: 10, boxShadow: '0 18px 55px rgba(15,23,42,0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
   modalHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid #e5e7eb' },
@@ -829,9 +916,8 @@ const s = {
   apiRowTop: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
   apiName: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 15 },
   apiRowSpacer: { flex: 1 },
-  apiPath: { margin: '7px 0 12px 16px', color: '#94a3b8', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  apiPath: { margin: '7px 85px 12px 16px', color: '#94a3b8', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   rowControls: { display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', paddingLeft: 16 },
-  rowSelect: { flex: '1 1 180px', minWidth: 140, maxWidth: 280, fontFamily: 'monospace', fontSize: 12, padding: '7px 9px', border: '1px solid #cbd5e1', borderRadius: 5, background: '#fff' },
   rowBtn: { padding: '7px 11px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 12, border: '1px solid #cbd5e1', borderRadius: 5, background: '#fff', whiteSpace: 'nowrap' },
   logsBtn: { padding: '6px 9px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 11, color: '#4338ca', background: '#fff', border: '1px solid #a5b4fc', borderRadius: 5, whiteSpace: 'nowrap' },
   logsBtnActive: { color: '#fff', background: '#4f46e5', border: '1px solid #4f46e5' },

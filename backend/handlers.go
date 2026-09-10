@@ -143,13 +143,15 @@ func (h *repoHandlers) checkout(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	var body struct {
-		Branch string `json:"branch"`
+		Branch       string `json:"branch"`
+		Stash        bool   `json:"stash"`
+		StashMessage string `json:"stashMessage"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Branch == "" {
 		http.Error(w, "missing branch", http.StatusBadRequest)
 		return
 	}
-	err := checkoutBranch(repo.Path, body.Branch)
+	err := checkoutBranch(repo.Path, body.Branch, body.Stash, body.StashMessage)
 	if err == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.8-snapshot] - 2026-09-10
+
+- Grouping of Git branches by prefix in the selector.
+- Option to save local modifications to a named stash when they prevent switching branches, then switch branches.
+- Blue downward arrow near the port when a branch contains commits to fetch from its tracking branch. Checked on open and then every five minutes while the interface is open,
+  and refreshed after Fetch, Update, or a branch change.
+- IntelliJ button under Logs to open the repository with 'idea .'. The command must be available in the PATH.
+
+
 ## [0.0.7] - 2026-07-21
 
 ### Added

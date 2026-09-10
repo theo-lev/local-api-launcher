@@ -156,6 +156,10 @@ func main() {
 			h.remove(w, r, id)
 		case r.Method == http.MethodPost && sub == "fetch":
 			h.fetch(w, r, id)
+		case r.Method == http.MethodPost && sub == "updates":
+			h.updates(w, r, id)
+		case r.Method == http.MethodPost && sub == "idea":
+			h.openIdea(w, r, id)
 		case r.Method == http.MethodPost && sub == "pull":
 			h.pull(w, r, id)
 		case r.Method == http.MethodGet && sub == "branches":

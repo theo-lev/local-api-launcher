@@ -16,6 +16,92 @@ select:disabled {
   opacity: 0.6;
 }
 
+.branch-picker {
+  flex: 1 1 180px;
+  min-width: 140px;
+  max-width: 280px;
+  align-self: flex-start;
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.branch-trigger, .branch-folder > summary {
+  padding: 7px 9px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.branch-trigger[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: default;
+}
+.branch-trigger {
+  position: relative;
+  display: block;
+  list-style: none;
+  padding-right: 30px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.branch-trigger::-webkit-details-marker {
+  display: none;
+}
+.branch-trigger::after {
+  content: '';
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid #64748b;
+  border-bottom: 1.5px solid #64748b;
+  transform: translateY(-70%) rotate(45deg);
+}
+.branch-options {
+  position: fixed;
+  z-index: 40;
+  margin: 0;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.15);
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.branch-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 3px;
+  padding: 7px 9px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.branch-option[aria-pressed="true"] {
+  color: #4338ca;
+  background: #eef2ff;
+}
+.branch-option:hover, .branch-folder > summary:hover {
+  background: #f1f5f9;
+}
+.branch-picker summary:focus-visible, .branch-option:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
+}
+.branch-folder-children { padding-left: 14px; }
+.branch-count { color: #64748b; font-size: 10px; }
+.branch-empty { padding: 7px 9px; color: #64748b; }
+
 .api-row:hover {
   background: #f8fafc !important;
 }
